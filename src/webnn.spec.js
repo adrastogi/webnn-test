@@ -63,8 +63,10 @@ class WebNNTestRunner {
     const jobs = parseInt(process.env.JOBS || '1', 10);
     const isParallel = jobs > 1;
 
-    // Automatic checkpoint/resume functionality
+    // Checkpoint functionality - only used within a single test run session
+    // Clear any previous checkpoint at the start of a new run
     const checkpointFile = this.getCheckpointFilePath();
+    this.clearCheckpoint(checkpointFile);
 
     if (isParallel) {
       console.log(`Running test cases in parallel with ${jobs} job(s): ${testCases.join(', ')}`);
@@ -113,38 +115,13 @@ class WebNNTestRunner {
       console.log(`Found ${testFiles.length} test files:`, testFiles);
     }
 
-    // Handle resume functionality
+    // Initialize variables for tracking within this run session
+    // Note: Checkpoints are cleared at the start, so these will always be empty initially
     let completedTestFiles = [];
     let previousResults = [];
     let previousWallTime = 0;
 
-    const checkpoint = this.loadCheckpoint(checkpointFile);
-    completedTestFiles = checkpoint.completedTests;
-    previousResults = checkpoint.completedResults;
-    previousWallTime = checkpoint.accumulatedWallTime || 0;
-
-    if (completedTestFiles.length > 0) {
-      console.log(`\n🔄 AUTO-RESUME: Found ${completedTestFiles.length} completed test(s) from previous run`);
-      console.log(`📋 Completed tests: ${completedTestFiles.join(', ')}`);
-      if (previousWallTime > 0) {
-        console.log(`⏱️  Previous wall time: ${previousWallTime.toFixed(2)}s`);
-      }
-
-      // Filter out already completed tests
-      const remainingTests = testFiles.filter(testFile => !completedTestFiles.includes(testFile));
-      console.log(`\n✅ Skipping ${completedTestFiles.length} completed test(s)`);
-      console.log(`▶️  Resuming with ${remainingTests.length} remaining test(s)\n`);
-
-      testFiles = remainingTests;
-    } else {
-      console.log(`\n▶️  Starting fresh run (no previous checkpoint found)\n`);
-    }
-
-    if (testFiles.length === 0) {
-      console.log('✅ All tests already completed!');
-      // Return previous results if resuming and all tests are done
-      return previousResults;
-    }
+    console.log(`\n▶️  Starting fresh test run with ${testFiles.length} test(s)\n`);
 
     const results = [];
     const testResultsMap = new Map(); // Map testFile to result for retry tracking
@@ -451,21 +428,28 @@ class WebNNTestRunner {
       await page.waitForTimeout(3000);
 
       // Wait for test completion indicators with longer timeout
+      // Use a more flexible approach that doesn't create failed test steps
       try {
-        // Look for common WPT completion indicators
-        // Increased timeout to 120 seconds (2 minutes) to allow tests to complete
-        await Promise.race([
-          page.waitForSelector('.status', { timeout: 120000 }),
-          page.waitForFunction(() =>
+        // Check if .status selector exists first (non-blocking)
+        const hasStatusSelector = await page.evaluate(() => {
+          return document.querySelector('.status') !== null;
+        });
+
+        if (hasStatusSelector) {
+          await page.waitForSelector('.status', { timeout: 120000 });
+        } else {
+          // Fall back to waiting for text indicators
+          await page.waitForFunction(() =>
             document.body.textContent.includes('Pass') ||
             document.body.textContent.includes('Fail') ||
             document.body.textContent.includes('Found') ||
             document.body.textContent.includes('test'),
             { timeout: 120000 }
-          )
-        ]);
+          );
+        }
       } catch (error) {
-        console.log(`⚠️ Timeout waiting for test completion indicators after 2 minutes, proceeding with current content`);
+        // Silently proceed - this is expected for some test pages
+        console.log(`⏭️ Proceeding with content analysis (${testName})`);
       }
 
       // Additional wait for test results to stabilize
@@ -1061,6 +1045,15 @@ class WebNNTestRunner {
     let currentBrowser = browser; // Track current browser instance
     let currentContext = context; // Track current context instance
 
+    // Track retry history for reporting
+    const retryHistory = [{
+      attemptNumber: 0,
+      status: previousResult.result,
+      passed: previousResult.subcases.passed,
+      failed: previousResult.subcases.failed,
+      total: previousResult.subcases.total
+    }];
+
     // Helper function to check if two failure results are identical
     const areFailuresIdentical = (result1, result2) => {
       if (!result1 || !result2) return false;
@@ -1185,6 +1178,15 @@ class WebNNTestRunner {
         previousRetryResult = currentResult;
         currentResult = retryResult;
 
+        // Record retry attempt in history
+        retryHistory.push({
+          attemptNumber: retryCount,
+          status: retryResult.result,
+          passed: retryResult.subcases.passed,
+          failed: retryResult.subcases.failed,
+          total: retryResult.subcases.total
+        });
+
         // Clean up
         try {
           if (retryPage && !retryPage.isClosed()) {
@@ -1238,6 +1240,19 @@ class WebNNTestRunner {
           break;
         }
       }
+    }
+
+    // Add retry history to final result for reporting
+    currentResult.retryHistory = retryHistory;
+
+    // Log retry summary if there were retries
+    if (retryHistory.length > 1) {
+      console.log(`\n📊 Retry Summary for ${testName}:`);
+      retryHistory.forEach((attempt, index) => {
+        const prefix = index === 0 ? 'Initial' : `Retry ${index}`;
+        console.log(`   ${prefix}: ${attempt.status} (${attempt.passed}/${attempt.total} passed, ${attempt.failed} failed)`);
+      });
+      console.log('');
     }
 
     return currentResult;
@@ -1831,31 +1846,52 @@ class WebNNTestRunner {
                 <th>Failed Subcases</th>
                 <th>Total Subcases</th>
                 <th>Success Rate</th>
+                <th>Retries</th>
                 <th>Execution Time</th>
             </tr>
         </thead>
         <tbody>
-            ${results.map(result => `
+            ${results.map(result => {
+              const retryCount = result.retryHistory ? result.retryHistory.length - 1 : 0;
+              const retryInfo = retryCount > 0 ? `${retryCount} retry(ies)` : 'No retries';
+              return `
                 <tr>
                     <td><strong>${(result.suite || 'N/A').toUpperCase()}</strong></td>
                     <td>
                         <strong>${result.testName}</strong>
                         ${result.testUrl ? `<br><small><a href="${result.testUrl}" target="_blank" style="color: #0366d6;">${result.testUrl}</a></small>` : ''}
+                        ${result.retryHistory && result.retryHistory.length > 1 ? `
+                        <br><details style="margin-top: 5px;">
+                            <summary style="cursor: pointer; color: #0366d6; font-size: 12px;">📊 View Retry History (${retryCount} attempts)</summary>
+                            <div style="margin-top: 5px; padding: 10px; background: #f6f8fa; border-radius: 4px;">
+                                ${result.retryHistory.map((attempt, idx) => `
+                                    <div style="margin: 3px 0; font-size: 11px;">
+                                        <strong>${idx === 0 ? 'Initial' : 'Retry ' + idx}:</strong>
+                                        <span class="status-${attempt.status.toLowerCase()}">${attempt.status}</span>
+                                        (${attempt.passed}/${attempt.total} passed, ${attempt.failed} failed)
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </details>
+                        ` : ''}
                     </td>
                     <td class="status-${result.result.toLowerCase()}">${result.result}</td>
                     <td class="pass">${result.subcases.passed}</td>
                     <td class="fail">${result.subcases.failed}</td>
                     <td>${result.subcases.total}</td>
                     <td>${result.subcases.total > 0 ? ((result.subcases.passed/result.subcases.total)*100).toFixed(1) : 0}%</td>
+                    <td style="font-size: 12px; color: #586069;">${retryInfo}</td>
                     <td>${result.executionTime ? result.executionTime + 's' : 'N/A'}</td>
                 </tr>
-            `).join('')}
+              `;
+            }).join('')}
             <tr style="background: #e8f5e9; font-weight: bold;">
                 <td colspan="3"><strong>TOTAL</strong></td>
                 <td class="pass"><strong>${passedSubcases}</strong></td>
                 <td class="fail"><strong>${failedSubcases}</strong></td>
                 <td><strong>${totalSubcases}</strong></td>
                 <td><strong>${totalSubcases > 0 ? ((passedSubcases/totalSubcases)*100).toFixed(1) : 0}%</strong></td>
+                <td><strong>${results.filter(r => r.retryHistory && r.retryHistory.length > 1).length} tests retried</strong></td>
                 <td><strong>${displaySumOfTimes}s</strong></td>
             </tr>
         </tbody>
@@ -1899,6 +1935,63 @@ class WebNNTestRunner {
             <div class="stat-label">Sum of Test Times</div>
         </div>
     </div>
+
+    ${results.filter(r => r.retryHistory && r.retryHistory.length > 1).length > 0 ? `
+    <h3>🔄 Retry Analysis</h3>
+    <div style="background: #fff3cd; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+        <p><strong>${results.filter(r => r.retryHistory && r.retryHistory.length > 1).length}</strong> test(s) required retries</p>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>Test Case</th>
+                <th>Initial Status</th>
+                <th>Final Status</th>
+                <th>Retry Attempts</th>
+                <th>Subcase Changes</th>
+            </tr>
+        </thead>
+        <tbody>
+            ${results.filter(r => r.retryHistory && r.retryHistory.length > 1).map(result => {
+              const initial = result.retryHistory[0];
+              const final = result.retryHistory[result.retryHistory.length - 1];
+              const retryCount = result.retryHistory.length - 1;
+              const subcaseChange = final.passed !== initial.passed || final.failed !== initial.failed;
+              return `
+                <tr>
+                    <td><strong>${result.testName}</strong></td>
+                    <td class="status-${initial.status.toLowerCase()}">${initial.status}<br><small>(${initial.passed}/${initial.total} passed)</small></td>
+                    <td class="status-${final.status.toLowerCase()}">${final.status}<br><small>(${final.passed}/${final.total} passed)</small></td>
+                    <td>${retryCount}</td>
+                    <td>
+                        ${subcaseChange ?
+                          `<span style="color: #fd7e14;">⚠️ Changed</span><br>
+                           <small>Passed: ${initial.passed} → ${final.passed}<br>
+                           Failed: ${initial.failed} → ${final.failed}</small>` :
+                          '<span style="color: #28a745;">✓ Consistent</span>'}
+                    </td>
+                </tr>
+                <tr>
+                    <td colspan="5" style="padding: 0;">
+                        <details style="padding: 10px; background: #f6f8fa;">
+                            <summary style="cursor: pointer; font-weight: bold;">View All Attempts</summary>
+                            <div style="margin-top: 10px;">
+                                ${result.retryHistory.map((attempt, idx) => `
+                                    <div style="padding: 8px; margin: 5px 0; background: white; border-left: 3px solid ${attempt.status === 'PASS' ? '#28a745' : attempt.status === 'FAIL' ? '#dc3545' : '#fd7e14'}; border-radius: 3px;">
+                                        <strong>${idx === 0 ? 'Initial Run' : 'Retry Attempt ' + idx}:</strong>
+                                        <span class="status-${attempt.status.toLowerCase()}">${attempt.status}</span><br>
+                                        <small>Passed: ${attempt.passed} | Failed: ${attempt.failed} | Total: ${attempt.total}</small>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </details>
+                    </td>
+                </tr>
+              `;
+            }).join('')}
+        </tbody>
+    </table>
+    ` : ''}
 
     ${dllCheckResults && dllCheckResults.found ? `
     <h3>🔍 ONNX Runtime DLL Detection (--ep flag)</h3>
@@ -1980,7 +2073,9 @@ class WebNNTestRunner {
 </html>`;
   }
 
-  // Checkpoint management methods for automatic resume functionality
+  // Checkpoint management methods for tracking progress within a single test run session
+  // Note: Checkpoints are cleared at the start of each new test run and only used
+  // internally during a run (e.g., to track completed tests in parallel mode)
   getCheckpointFilePath() {
     const fs = require('fs');
     const path = require('path');

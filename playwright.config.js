@@ -5,7 +5,7 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './src',
-  testMatch: '**/*.spec.js',
+  testMatch: '**/webnn.js',  // Only match webnn.js test file
   /* Test timeout - 10 minutes for WebNN tests */
   timeout: 600000, // 10 minutes
   /* Run tests in files in parallel */

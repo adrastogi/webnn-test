@@ -66,6 +66,19 @@ if (pauseIndex !== -1 && pauseIndex + 1 < args.length) {
   pauseCase = args[pauseIndex + 1];
 }
 
+// Find --email argument
+const emailIndex = args.findIndex(arg => arg === '--email');
+let emailAddress = null;
+if (emailIndex !== -1) {
+  // Check if next arg exists and is not another flag (doesn't start with --)
+  if (emailIndex + 1 < args.length && !args[emailIndex + 1].startsWith('--')) {
+    emailAddress = args[emailIndex + 1];
+  } else {
+    // --email flag without address, use default
+    emailAddress = 'ygu@microsoft.com';
+  }
+}
+
 // Find --ep argument
 epFlag = args.includes('--ep');
 
@@ -88,6 +101,9 @@ if (wptRange) {
 }
 if (pauseCase) {
   console.log(`🛑 Pause enabled for case(s): ${pauseCase}`);
+}
+if (emailAddress) {
+  console.log(`📧 Email reports will be sent to: ${emailAddress}`);
 }
 if (jobs > 1) {
   console.log(`Parallel execution enabled: ${jobs} job(s)`);
@@ -127,34 +143,8 @@ if (wptRange) {
 if (pauseCase) {
   process.env.PAUSE_CASE = pauseCase;
 }
-
-// Helper function to clear checkpoint directory
-function clearCheckpointDirectory() {
-  const fs = require('fs');
-  const path = require('path');
-  const checkpointDir = path.join(process.cwd(), '.checkpoint');
-
-  if (fs.existsSync(checkpointDir)) {
-    try {
-      const deleteDirRecursive = (dirPath) => {
-        if (fs.existsSync(dirPath)) {
-          fs.readdirSync(dirPath).forEach((file) => {
-            const curPath = path.join(dirPath, file);
-            if (fs.lstatSync(curPath).isDirectory()) {
-              deleteDirRecursive(curPath);
-            } else {
-              fs.unlinkSync(curPath);
-            }
-          });
-          fs.rmdirSync(dirPath);
-        }
-      };
-      deleteDirRecursive(checkpointDir);
-      console.log('✅ Cleared checkpoint directory for fresh run');
-    } catch (error) {
-      console.log(`⚠️  Warning: Could not clear checkpoint directory: ${error.message}`);
-    }
-  }
+if (emailAddress) {
+  process.env.EMAIL_ADDRESS = emailAddress;
 }
 
 // Function to run a single test iteration
@@ -166,9 +156,6 @@ function runTestIteration(iteration, totalIterations) {
       console.log(`\n${'='.repeat(80)}`);
       console.log(`🔁 ITERATION ${iteration}/${totalIterations}`);
       console.log(`${'='.repeat(80)}\n`);
-
-      // Clear checkpoint before each iteration to ensure fresh start
-      clearCheckpointDirectory();
     }
 
     // Set iteration number in environment for the test to use
@@ -186,6 +173,7 @@ function runTestIteration(iteration, totalIterations) {
       '--preview-case', testCase,
       '--wpt-range', wptRange,
       '--pause', pauseCase,
+      '--email', emailAddress,
       '--ep',
       '--jobs', jobs.toString(),
       '--repeat', repeat.toString()
@@ -209,6 +197,13 @@ function runTestIteration(iteration, totalIterations) {
             prevArg === '--jobs' ||
             prevArg === '--repeat') {
           return false; // This is a value for a custom option, skip it
+        }
+        // Special case for --email: only skip next arg if it's not a flag
+        if (prevArg === '--email') {
+          if (!arg.startsWith('--')) {
+            return false; // This is an email address, skip it
+          }
+          // Otherwise it's the next flag, keep it
         }
       }
 

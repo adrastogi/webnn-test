@@ -30,42 +30,42 @@ npx playwright install
 
 ```bash
 # Run WPT tests (default)
-node src/test.js
+node src/main.js
 
 # Run specific test suite
-node src/test.js --suite wpt
-node src/test.js --suite sample
-node src/test.js --suite preview
+node src/main.js --suite wpt
+node src/main.js --suite sample
+node src/main.js --suite preview
 
 # Run multiple test suites (comma-separated, no spaces)
-node src/test.js --suite "wpt,sample"
-node src/test.js --suite "wpt,preview"
-node src/test.js --suite "wpt,sample,preview"
+node src/main.js --suite "wpt,sample"
+node src/main.js --suite "wpt,preview"
+node src/main.js --suite "wpt,sample,preview"
 
 # Run specific test cases
-node src/test.js --suite wpt --wpt-case abs
-node src/test.js --suite wpt --wpt-case arg_min
-node src/test.js --suite sample --sample-case image-classification
-node src/test.js --suite preview --preview-case image-classification
+node src/main.js --suite wpt --wpt-case abs
+node src/main.js --suite wpt --wpt-case arg_min
+node src/main.js --suite sample --sample-case image-classification
+node src/main.js --suite preview --preview-case image-classification
 
 # Run multiple test cases (comma-separated)
-node src/test.js --suite wpt --wpt-case abs,add
-node src/test.js --suite wpt --wpt-case abs,add,arg_min
+node src/main.js --suite wpt --wpt-case abs,add
+node src/main.js --suite wpt --wpt-case abs,add,arg_min
 
 # Run with --ep flag to check ONNX Runtime DLLs
-node src/test.js --suite wpt --wpt-case abs --ep
-node src/test.js --suite wpt,sample --wpt-case abs --ep
+node src/main.js --suite wpt --wpt-case abs --ep
+node src/main.js --suite wpt,sample --wpt-case abs --ep
 
 # Run with parallel execution (use multiple jobs)
-node src/test.js --suite wpt --wpt-case "add,sub,mul,div" --jobs 2
-node src/test.js --suite wpt --wpt-case "add,sub,mul,div" --jobs 4
+node src/main.js --suite wpt --wpt-case "add,sub,mul,div" --jobs 2
+node src/main.js --suite wpt --wpt-case "add,sub,mul,div" --jobs 4
 
 # Run tests multiple times (repeat mode)
-node src/test.js --suite wpt --wpt-case "add,sub" --repeat 3
-node src/test.js --suite wpt --wpt-case "add,sub,mul,div" --jobs 2 --repeat 5
+node src/main.js --suite wpt --wpt-case "add,sub" --repeat 3
+node src/main.js --suite wpt --wpt-case "add,sub,mul,div" --jobs 2 --repeat 5
 
 # Combine all options
-node src/test.js --suite wpt --wpt-case "add,sub" --jobs 2 --repeat 3 --ep
+node src/main.js --suite wpt --wpt-case "add,sub" --jobs 2 --repeat 3 --ep
 ```
 
 ### Method 2: Using npm scripts
@@ -108,25 +108,25 @@ Use suite-specific case options to run only tests that partially match the case 
 
 ```bash
 # Run only WPT tests containing "abs" in the name
-node src/test.js --suite wpt --wpt-case abs
+node src/main.js --suite wpt --wpt-case abs
 # This will run: abs.html?gpu
 
 # Run only WPT tests containing "arg" in the name
-node src/test.js --suite wpt --wpt-case arg
+node src/main.js --suite wpt --wpt-case arg
 # This will run: arg_min_max.html?gpu, etc.
 
 # Run multiple WPT cases - tests containing "abs" OR "add" (no spaces)
-node src/test.js --suite wpt --wpt-case abs,add
+node src/main.js --suite wpt --wpt-case abs,add
 # This will run: abs.html?gpu, add.html?gpu, etc.
 
 # Run specific sample case
-node src/test.js --suite sample --sample-case image-classification
+node src/main.js --suite sample --sample-case image-classification
 
 # Run specific preview case
-node src/test.js --suite preview --preview-case image-classification
+node src/main.js --suite preview --preview-case image-classification
 
 # Run multiple suites with specific cases for one suite
-node src/test.js --suite wpt,sample --wpt-case abs --ep
+node src/main.js --suite wpt,sample --wpt-case abs --ep
 # This will run: WPT "abs" test + ALL sample tests + DLL check
 ```
 
@@ -138,13 +138,13 @@ Run multiple tests in parallel to speed up execution:
 
 ```bash
 # Run with 2 parallel jobs
-node src/test.js --suite wpt --wpt-case "add,sub,mul,div" --jobs 2
+node src/main.js --suite wpt --wpt-case "add,sub,mul,div" --jobs 2
 
 # Run with 4 parallel jobs
-node src/test.js --suite wpt --wpt-case "add,sub,mul,div" --jobs 4
+node src/main.js --suite wpt --wpt-case "add,sub,mul,div" --jobs 4
 
 # The more jobs, the faster the execution (up to your CPU cores)
-node src/test.js --suite wpt --jobs 8
+node src/main.js --suite wpt --jobs 8
 ```
 
 **Benefits:**
@@ -158,25 +158,24 @@ Run the entire test suite multiple times for stability testing or performance an
 
 ```bash
 # Run tests 3 times
-node src/test.js --suite wpt --wpt-case "add,sub" --repeat 3
+node src/main.js --suite wpt --wpt-case "add,sub" --repeat 3
 
 # Run with parallel execution, repeated 5 times
-node src/test.js --suite wpt --wpt-case "add,sub,mul,div" --jobs 2 --repeat 5
+node src/main.js --suite wpt --wpt-case "add,sub,mul,div" --jobs 2 --repeat 5
 
 # Combine with all options
-node src/test.js --suite wpt --wpt-case "add" --jobs 4 --repeat 10 --ep
+node src/main.js --suite wpt --wpt-case "add" --jobs 4 --repeat 10 --ep
 ```
 
 **How it works:**
 - 🔁 **Independent iterations**: Each iteration is a standalone test run
-- 🧹 **Fresh start**: Checkpoint cleared before each iteration
 - 📊 **Separate reports**: Each iteration gets its own timestamped report with `_iterN` suffix
 - ⏱️ **2-second delay**: Brief pause between iterations for stability
 - 📈 **Summary**: Shows pass/fail status for all iterations at the end
 
 **Example output:**
 ```bash
-node src/test.js --suite wpt --wpt-case "add,sub" --repeat 3
+node src/main.js --suite wpt --wpt-case "add,sub" --repeat 3
 
 # Output:
 ================================================================================
@@ -218,49 +217,6 @@ node src/test.js --suite wpt --wpt-case "add,sub" --repeat 3
 - 📊 **Performance analysis**: Compare execution times across iterations
 - 🐛 **Flakiness detection**: Identify intermittent failures
 - 🔬 **Stress testing**: Run tests repeatedly to catch edge cases
-
-## Automatic Checkpoint & Resume
-
-The test runner automatically saves progress and resumes from where it left off if interrupted:
-
-**How it works:**
-- ✅ **Automatic**: No flags needed - resume is always enabled
-- 💾 **Progress saved**: Checkpoint saved after each test completes
-- 🔄 **Auto-resume**: Next run automatically skips completed tests
-- 📁 **Checkpoint files**: Stored in `.checkpoint/` directory (git-ignored)
-- 🎯 **Test-specific**: Each test case combination has its own checkpoint
-- 🧹 **Clean slate**: Delete `.checkpoint/` folder to start completely fresh
-
-**Example:**
-```bash
-# Start a test run with 10 tests
-node src/test.js --suite wpt --wpt-case "add,sub,mul,div" --jobs 2
-# Tests 1-5 complete...
-# Press Ctrl+C to interrupt
-
-# Run again - automatically resumes
-node src/test.js --suite wpt --wpt-case "add,sub,mul,div" --jobs 2
-# Output: "🔄 AUTO-RESUME: Found 5 completed test(s) from previous run"
-#         "▶️  Resuming with 5 remaining test(s)"
-# Continues from test 6...
-```
-
-**Smart retry logic:**
-- ✅ **PASS/FAIL results**: Saved to checkpoint (won't re-run)
-- ⚠️ **ERROR/UNKNOWN results**: NOT saved (will retry on next run)
-- 🔁 **Failed tests**: Retry until 2 consecutive identical failures seen
-- ⏱️ **Wall time**: Accumulated across all sessions
-
-**To start completely fresh:**
-```bash
-# Delete checkpoint folder
-Remove-Item -Recurse -Force .checkpoint
-# or on Linux/Mac:
-rm -rf .checkpoint
-
-# Run tests
-node src/test.js --suite wpt --wpt-case "add,sub,mul,div" --jobs 2
-```
 
 ## Configuration
 
@@ -312,17 +268,38 @@ npm run report
 2. **Network issues**: Ensure you have internet access to reach `wpt.live`
 3. **WebNN features not available**: Make sure you're using a recent version of Chrome Canary with WebNN support
 
+## Email Reports
+
+Send test results via email (requires Outlook):
+
+```bash
+# Send to default email (ygu@microsoft.com)
+node src/main.js --suite wpt --email
+
+# Send to custom email
+node src/main.js --suite wpt --email john.doe@example.com
+
+# Works with all options
+node src/main.js --suite wpt --jobs 4 --repeat 3 --email
+```
+
+**Email includes:**
+- Test summary with pass/fail statistics
+- Execution timing and parallel speedup
+- Detailed results for each test case
+
+**Requirements:** Windows with Outlook installed and configured.
+
 ## File Structure
 
 ```
 webnn-test/
 ├── src/
-│   ├── webnn.spec.js          # Main test file
-│   ├── test.js                # Node.js test runner
-│   └── clean-report.js        # Report post-processor
+│   ├── webnn.js               # Main test implementation
+│   └── main.js                # CLI wrapper and test runner
 ├── tools/                     # PowerShell utilities
+├── report/                    # Generated HTML test reports
 ├── package.json               # Node.js dependencies
 ├── playwright.config.js       # Playwright configuration
-├── prepare.md                # Setup instructions
-└── README.md                 # This file
+└── README.md                  # This file
 ```

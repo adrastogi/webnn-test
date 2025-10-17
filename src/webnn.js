@@ -79,11 +79,6 @@ class WebNNTestRunner {
     const jobs = parseInt(process.env.JOBS || '1', 10);
     const isParallel = jobs > 1;
 
-    // Checkpoint functionality - only used within a single test run session
-    // Clear any previous checkpoint at the start of a new run
-    const checkpointFile = this.getCheckpointFilePath();
-    this.clearCheckpoint(checkpointFile);
-
     if (isParallel) {
       console.log(`Running test cases in parallel with ${jobs} job(s): ${testCases.join(', ')}`);
     } else {
@@ -105,6 +100,31 @@ class WebNNTestRunner {
         })
         .filter(name => name && name.endsWith('.js'));
     });
+
+    // Close the discovery page after getting all test files
+    console.log('✅ Test discovery complete - closing discovery page...');
+    await this.page.close();
+    console.log('✅ Discovery page closed');
+
+    // Create a fresh browser context for test execution
+    console.log('🔄 Creating fresh browser context for test execution...');
+
+    // Close all remaining pages in the current context
+    const discoveryPages = context.pages();
+    for (const page of discoveryPages) {
+      if (!page.isClosed()) {
+        await page.close();
+      }
+    }
+
+    // Close the discovery context
+    await context.close();
+    console.log('   ✅ Closed discovery context');
+
+    // Create new context for test execution
+    context = await browser.newContext();
+    console.log('   ✅ Created fresh browser context for test execution');
+    console.log(`   📍 Context ID: ${context._guid || 'N/A'}\n`);
 
     // Apply test case selection if specified - run cases sequentially
     if (testCases.length > 0) {
@@ -149,120 +169,45 @@ class WebNNTestRunner {
       }
     }
 
-    // Initialize variables for tracking within this run session
-    // Note: Checkpoints are cleared at the start, so these will always be empty initially
-    let completedTestFiles = [];
-    let previousResults = [];
-    let previousWallTime = 0;
-
     console.log(`\n▶️  Starting fresh test run with ${testFiles.length} test(s)\n`);
 
     const results = [];
     const testResultsMap = new Map(); // Map testFile to result for retry tracking
 
-    // Execute tests based on parallel/sequential mode
-    if (isParallel) {
-      // Parallel execution using Promise.all with concurrency limit
-      let completedTests = 0;
-      const totalTests = testFiles.length;
+    // Unified execution for both parallel and sequential modes
+    // Sequential mode (jobs=1) is just a special case where chunk size = 1
+    let completedTests = 0;
+    const totalTests = testFiles.length;
 
-      const executeTest = async (testFile, index, totalFiles) => {
-        const testStartTime = Date.now();
-        let page = null;
+    const executeTest = async (testFile, index, totalFiles, batchContext) => {
+      const testStartTime = Date.now();
+      let page = null;
 
+      try {
+        // Check if context is still valid before creating page
         try {
-          // Check if context is still valid before creating page
-          try {
-            page = await context.newPage();
-          } catch (contextError) {
-            console.error(`❌ Failed to create page for ${testFile}: ${contextError.message}`);
-            // Return error result if context is closed
-            return {
-              testName: testFile.replace('.https.any.js', '').replace('.js', ''),
-              testUrl: `https://wpt.live/webnn/conformance_tests/${testFile.replace('.js', '.html')}?gpu`,
-              testFile: testFile,
-              result: 'ERROR',
-              errors: [{ text: `Context closed: ${contextError.message}`, selector: 'exception' }],
-              fullText: `Exception: Context closed - ${contextError.message}`,
-              hasErrors: true,
-              details: contextError.stack || contextError.message,
-              subcases: { total: 1, passed: 0, failed: 1, details: [] },
-              suite: 'wpt',
-              executionTime: '0.00'
-            };
-          }
-
-          // Pass skipRetry=true to prevent immediate retries
-          const result = await this.runSingleWptTest(page, testFile, index, totalFiles, 0, context, browser, null, true);
-
-          // Add execution time and testFile to result
-          const testEndTime = Date.now();
-          const executionTime = ((testEndTime - testStartTime) / 1000).toFixed(2);
-          result.executionTime = executionTime;
-          result.testFile = testFile;
-
-          // Update progress after each test completes
-          completedTests++;
-          const percentage = ((completedTests / totalTests) * 100).toFixed(1);
-          console.log(`📊 Progress: ${completedTests}/${totalTests} tests completed (${percentage}%) - ${result.testName}: ${executionTime}s`);
-
-          return result;
-        } finally {
-          // Always close the page after test completes (if it was created)
-          if (page && !page.isClosed()) {
-            try {
-              await page.close();
-            } catch (closeError) {
-              console.log(`⚠️  Warning: Failed to close page for ${testFile}: ${closeError.message}`);
-            }
-          }
-        }
-      };
-
-      // Split tests into chunks based on job count
-      const chunks = [];
-      for (let i = 0; i < testFiles.length; i += jobs) {
-        chunks.push(testFiles.slice(i, i + jobs));
-      }
-
-      console.log(`\n🚀 Starting parallel execution: ${totalTests} tests with ${jobs} job(s)`);
-      console.log(`📦 Split into ${chunks.length} chunk(s)\n`);
-
-      // Execute chunks sequentially, but tests within each chunk in parallel
-      for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-        const chunk = chunks[chunkIndex];
-        const chunkNum = chunkIndex + 1;
-
-        console.log(`\n📦 Processing chunk ${chunkNum}/${chunks.length} (${chunk.length} test(s))...`);
-
-        const chunkResults = await Promise.all(
-          chunk.map((testFile, indexInChunk) => {
-            const absoluteIndex = chunks.slice(0, chunkIndex).flat().length + indexInChunk;
-            return executeTest(testFile, absoluteIndex, testFiles.length);
-          })
-        );
-        results.push(...chunkResults);
-      }
-    } else {
-      // Sequential execution (original behavior)
-      for (let i = 0; i < testFiles.length; i++) {
-        const testFile = testFiles[i];
-        const testStartTime = Date.now();
-
-        // Restart browser before each test (except the first one)
-        if (i > 0 && context) {
-          console.log(`\n🔄 Restarting browser for test ${i + 1}/${testFiles.length}...`);
-          try {
-            await this.page.close();
-            this.page = await context.newPage();
-            console.log('✅ Browser restarted successfully\n');
-          } catch (error) {
-            console.log(`⚠️ Error restarting browser: ${error.message}, continuing with existing page`);
-          }
+          console.log(`🔍 Creating page for ${testFile} using context ID: ${batchContext._guid || 'N/A'}`);
+          page = await batchContext.newPage();
+        } catch (contextError) {
+          console.error(`❌ Failed to create page for ${testFile}: ${contextError.message}`);
+          // Return error result if context is closed
+          return {
+            testName: testFile.replace('.https.any.js', '').replace('.js', ''),
+            testUrl: `https://wpt.live/webnn/conformance_tests/${testFile.replace('.js', '.html')}?gpu`,
+            testFile: testFile,
+            result: 'ERROR',
+            errors: [{ text: `Context closed: ${contextError.message}`, selector: 'exception' }],
+            fullText: `Exception: Context closed - ${contextError.message}`,
+            hasErrors: true,
+            details: contextError.stack || contextError.message,
+            subcases: { total: 1, passed: 0, failed: 1, details: [] },
+            suite: 'wpt',
+            executionTime: '0.00'
+          };
         }
 
         // Pass skipRetry=true to prevent immediate retries
-        const result = await this.runSingleWptTest(this.page, testFile, i, testFiles.length, 0, context, browser, null, true);
+        const result = await this.runSingleWptTest(page, testFile, index, totalFiles, 0, batchContext, browser, null, true);
 
         // Add execution time and testFile to result
         const testEndTime = Date.now();
@@ -270,7 +215,79 @@ class WebNNTestRunner {
         result.executionTime = executionTime;
         result.testFile = testFile;
 
-        results.push(result);
+        // Update progress after each test completes
+        completedTests++;
+        const percentage = ((completedTests / totalTests) * 100).toFixed(1);
+        console.log(`📊 Progress: ${completedTests}/${totalTests} tests completed (${percentage}%) - ${result.testName}: ${executionTime}s`);
+
+        return result;
+      } finally {
+        // Always close the page after test completes (if it was created)
+        if (page && !page.isClosed()) {
+          try {
+            await page.close();
+          } catch (closeError) {
+            console.log(`⚠️  Warning: Failed to close page for ${testFile}: ${closeError.message}`);
+          }
+        }
+      }
+    };
+
+    // Split tests into chunks based on job count
+    const chunks = [];
+    for (let i = 0; i < testFiles.length; i += jobs) {
+      chunks.push(testFiles.slice(i, i + jobs));
+    }
+
+    if (isParallel) {
+      console.log(`\n🚀 Starting parallel execution: ${totalTests} tests with ${jobs} job(s)`);
+    } else {
+      console.log(`\n� Starting sequential execution: ${totalTests} test(s)`);
+    }
+    console.log(`�📦 Split into ${chunks.length} chunk(s) (${jobs} test(s) per chunk)\n`);
+
+    // Track the current browser context
+    let currentBatchContext = context;
+    console.log(`📍 Initialized currentBatchContext from context (ID: ${currentBatchContext._guid || 'N/A'})\n`);
+
+    // Execute chunks sequentially, but tests within each chunk in parallel
+    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+      const chunk = chunks[chunkIndex];
+      const chunkNum = chunkIndex + 1;
+
+      console.log(`\n📦 Processing chunk ${chunkNum}/${chunks.length} (${chunk.length} test(s))...`);
+
+      const chunkResults = await Promise.all(
+        chunk.map((testFile, indexInChunk) => {
+          const absoluteIndex = chunks.slice(0, chunkIndex).flat().length + indexInChunk;
+          return executeTest(testFile, absoluteIndex, testFiles.length, currentBatchContext);
+        })
+      );
+      results.push(...chunkResults);
+
+      // After batch completes, create a fresh browser context for the NEXT batch
+      // (but not after the last batch since there's no next batch)
+      if (chunkIndex < chunks.length - 1 && browser) {
+        console.log(`\n🔄 Creating fresh browser context for next chunk...`);
+        try {
+          // Close all pages in the current batch context
+          const currentPages = currentBatchContext.pages();
+          for (const page of currentPages) {
+            if (!page.isClosed()) {
+              await page.close();
+            }
+          }
+
+          // Close the current batch context
+          await currentBatchContext.close();
+          console.log(`   ✅ Closed batch ${chunkNum} context`);
+
+          // Create new context for next batch
+          currentBatchContext = await browser.newContext();
+          console.log(`   ✅ Created fresh browser context for batch ${chunkNum + 1}\n`);
+        } catch (error) {
+          console.log(`   ⚠️ Error recreating context: ${error.message}, continuing with existing context`);
+        }
       }
     }
 
@@ -298,12 +315,7 @@ class WebNNTestRunner {
       // Clean up all pages/contexts from initial test execution before retry phase
       console.log(`\n🧹 Cleaning up browser contexts before retry phase...`);
       try {
-        // Close the main page used for test discovery
-        if (this.page && !this.page.isClosed()) {
-          console.log(`   Closing main page (${this.page.url()})...`);
-          await this.page.close();
-          console.log(`   ✅ Main page closed`);
-        }
+        // Note: Discovery page was already closed after getting test files
 
         // Get all pages in the context and close them
         if (context) {
@@ -351,14 +363,6 @@ class WebNNTestRunner {
           results[resultIndex] = finalResult;
         }
         testResultsMap.set(testFile, finalResult);
-
-        // Save checkpoint for completed tests
-        const currentWallTime = ((Date.now() - suiteStartTime) / 1000) + previousWallTime;
-        if (finalResult.result === 'PASS' || finalResult.result === 'FAIL') {
-          this.saveCheckpoint(checkpointFile, testFile, finalResult, currentWallTime);
-        } else {
-          console.log(`⚠️  Test ${finalResult.testName} still has ${finalResult.result} status - will be retested on next run`);
-        }
       }
 
       console.log(`\n\n${'='.repeat(80)}`);
@@ -366,24 +370,13 @@ class WebNNTestRunner {
       console.log(`${'='.repeat(80)}\n`);
     } else {
       console.log(`\n✅ All tests passed on first attempt - no retries needed!\n`);
-
-      // Save checkpoints for all PASS results
-      results.forEach(result => {
-        const currentWallTime = ((Date.now() - suiteStartTime) / 1000) + previousWallTime;
-        if (result.result === 'PASS') {
-          this.saveCheckpoint(checkpointFile, result.testFile, result, currentWallTime);
-        }
-      });
     }
 
     // Calculate wall time (actual elapsed time) and sum of individual test times
     const suiteEndTime = Date.now();
     const sessionWallTime = ((suiteEndTime - suiteStartTime) / 1000).toFixed(2);
-    const totalWallTime = (parseFloat(sessionWallTime) + previousWallTime).toFixed(2);
 
-    // Merge previous results with new results
-    const allResults = [...previousResults, ...results];
-    const sumOfTestTimes = allResults.reduce((sum, r) => sum + (parseFloat(r.executionTime) || 0), 0).toFixed(2);
+    const sumOfTestTimes = results.reduce((sum, r) => sum + (parseFloat(r.executionTime) || 0), 0).toFixed(2);
 
     // Log execution summary
     if (testCases.length > 0) {
@@ -393,36 +386,24 @@ class WebNNTestRunner {
         console.log(`\n✅ Completed sequential execution of cases: ${testCases.join(' → ')}`);
       }
 
-      if (previousResults.length > 0) {
-        console.log(`\n📊 Total Summary (including ${previousResults.length} previously completed test(s)):`);
-        console.log(`   Previously completed: ${previousResults.length}`);
-        console.log(`   Newly executed: ${results.length}`);
-        console.log(`   Total: ${allResults.length}`);
-      } else {
-        console.log(`Total test files executed: ${allResults.length}`);
-      }
-
-      console.log(`⏱️  Wall time (this session): ${sessionWallTime}s`);
-      if (previousWallTime > 0) {
-        console.log(`⏱️  Wall time (total across all sessions): ${totalWallTime}s`);
-      }
-      console.log(`⏱️  Sum of individual test times (all tests): ${sumOfTestTimes}s`);
+      console.log(`Total test files executed: ${results.length}`);
+      console.log(`⏱️  Wall time: ${sessionWallTime}s`);
+      console.log(`⏱️  Sum of individual test times: ${sumOfTestTimes}s`);
       if (isParallel && results.length > 0) {
-        const sessionSumTime = results.reduce((sum, r) => sum + (parseFloat(r.executionTime) || 0), 0).toFixed(2);
-        const speedup = (parseFloat(sessionSumTime) / parseFloat(sessionWallTime)).toFixed(2);
-        console.log(`⚡ Parallel speedup (this session): ${speedup}x`);
+        const speedup = (parseFloat(sumOfTestTimes) / parseFloat(sessionWallTime)).toFixed(2);
+        console.log(`⚡ Parallel speedup: ${speedup}x`);
       }
 
-      // Log individual test times (only for newly executed tests)
+      // Log individual test times
       if (results.length > 0) {
-        console.log(`\n⏱️  Individual test execution times (this session):`);
+        console.log(`\n⏱️  Individual test execution times:`);
         results.forEach(result => {
           console.log(`   ${result.testName}: ${result.executionTime}s`);
         });
       }
     }
 
-    return allResults;
+    return results;
   }
 
   async runSingleWptTest(page, testFile, index, totalFiles, retryCount = 0, context = null, browser = null, previousResult = null, skipRetry = false) {
@@ -2148,89 +2129,104 @@ class WebNNTestRunner {
 </html>`;
   }
 
-  // Checkpoint management methods for tracking progress within a single test run session
-  // Note: Checkpoints are cleared at the start of each new test run and only used
-  // internally during a run (e.g., to track completed tests in parallel mode)
-  getCheckpointFilePath() {
-    const fs = require('fs');
-    const path = require('path');
-
-    // Create checkpoint directory if it doesn't exist
-    const checkpointDir = path.join(process.cwd(), '.checkpoint');
-    if (!fs.existsSync(checkpointDir)) {
-      fs.mkdirSync(checkpointDir, { recursive: true });
-    }
-
-    // Use test case name in checkpoint filename for uniqueness
-    const testCaseFilter = process.env.WPT_CASE || 'all';
-    const sanitizedCase = testCaseFilter.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-    return path.join(checkpointDir, `wpt_checkpoint_${sanitizedCase}.json`);
-  }
-
-  loadCheckpoint(checkpointFile) {
-    const fs = require('fs');
-
+  async sendEmailReport(emailAddress, testSuites, results, wallTime, sumOfTestTimes, reportTimestamp = null) {
     try {
-      if (fs.existsSync(checkpointFile)) {
-        const data = fs.readFileSync(checkpointFile, 'utf8');
-        const checkpoint = JSON.parse(data);
-        return {
-          completedTests: checkpoint.completedTests || [],
-          completedResults: checkpoint.completedResults || [],
-          accumulatedWallTime: checkpoint.accumulatedWallTime || 0
-        };
+      console.log(`\n📧 Sending email report to ${emailAddress}...`);
+
+      // Calculate summary statistics
+      const totalSubcases = results.reduce((sum, r) => sum + r.subcases.total, 0);
+      const passedSubcases = results.reduce((sum, r) => sum + r.subcases.passed, 0);
+      const successRate = totalSubcases > 0 ? ((passedSubcases / totalSubcases) * 100).toFixed(1) : '0.0';
+
+      const suiteTitle = testSuites.length > 1 ?
+        testSuites.map(s => s.toUpperCase()).join(', ') :
+        testSuites[0].toUpperCase();
+
+      // Get machine name
+      const os = require('os');
+      const machineName = os.hostname();
+
+      // Use provided timestamp (from report filename) or generate new one
+      const timestamp = reportTimestamp || (() => {
+        const now = new Date();
+        return now.getFullYear().toString() +
+               (now.getMonth() + 1).toString().padStart(2, '0') +
+               now.getDate().toString().padStart(2, '0') +
+               now.getHours().toString().padStart(2, '0') +
+               now.getMinutes().toString().padStart(2, '0') +
+               now.getSeconds().toString().padStart(2, '0');
+      })();
+
+      // Create email subject with machine name and timestamp (matching report filename format)
+      const subject = `WebNN Test Report - ${suiteTitle} - ${successRate}% - ${machineName} - ${timestamp}`;      // Generate the full HTML report using the existing generateHtmlReport method
+      const htmlBody = this.generateHtmlReport(testSuites, null, results, null, wallTime, sumOfTestTimes);
+
+      // Use PowerShell to send email via Outlook COM automation
+      const { execSync } = require('child_process');
+      const fs = require('fs');
+      const path = require('path');
+
+      // Create a temporary PowerShell script file to avoid escaping issues
+      const tempScriptPath = path.join(os.tmpdir(), `send-email-${Date.now()}.ps1`);
+
+      // Save HTML body to a temporary file
+      const tempHtmlPath = path.join(os.tmpdir(), `email-body-${Date.now()}.html`);
+      fs.writeFileSync(tempHtmlPath, htmlBody, 'utf8');
+
+      // PowerShell script to send email via Outlook
+      const psScript = `
+try {
+  $outlook = New-Object -ComObject Outlook.Application
+  $mail = $outlook.CreateItem(0)
+  $mail.To = "${emailAddress}"
+  $mail.Subject = @"
+${subject}
+"@
+
+  # Read HTML content from file
+  $htmlContent = Get-Content -Path "${tempHtmlPath.replace(/\\/g, '\\\\')}" -Raw -Encoding UTF8
+
+  # Set HTML body
+  $mail.HTMLBody = $htmlContent
+
+  $mail.Send()
+  Write-Host "Email sent successfully"
+  [System.Runtime.Interopservices.Marshal]::ReleaseComObject($outlook) | Out-Null
+
+  # Clean up temp HTML file
+  Remove-Item -Path "${tempHtmlPath.replace(/\\/g, '\\\\')}" -ErrorAction SilentlyContinue
+
+  exit 0
+} catch {
+  Write-Error $_.Exception.Message
+  # Clean up temp HTML file on error
+  Remove-Item -Path "${tempHtmlPath.replace(/\\/g, '\\\\')}" -ErrorAction SilentlyContinue
+  exit 1
+}
+`;
+
+      // Write script to temp file
+      fs.writeFileSync(tempScriptPath, psScript, 'utf8');
+
+      try {
+        // Execute PowerShell script from file
+        execSync(`powershell -ExecutionPolicy Bypass -File "${tempScriptPath}"`, {
+          encoding: 'utf8',
+          stdio: 'inherit'
+        });
+      } finally {
+        // Clean up temp file
+        try {
+          fs.unlinkSync(tempScriptPath);
+        } catch (e) {
+          // Ignore cleanup errors
+        }
       }
+
+      console.log(`✅ Email sent successfully to ${emailAddress}`);
     } catch (error) {
-      console.log(`⚠️ Warning: Could not load checkpoint file: ${error.message}`);
-    }
-
-    return { completedTests: [], completedResults: [], accumulatedWallTime: 0 };
-  }
-
-  saveCheckpoint(checkpointFile, completedTestFile, testResult, currentSessionWallTime = null) {
-    const fs = require('fs');
-
-    try {
-      // Load existing checkpoint
-      const checkpoint = this.loadCheckpoint(checkpointFile);
-
-      // Add the newly completed test if not already in the list
-      if (!checkpoint.completedTests.includes(completedTestFile)) {
-        checkpoint.completedTests.push(completedTestFile);
-        checkpoint.completedResults.push(testResult);
-      }
-
-      // Update accumulated wall time if provided
-      let accumulatedWallTime = checkpoint.accumulatedWallTime;
-      if (currentSessionWallTime !== null) {
-        accumulatedWallTime = currentSessionWallTime;
-      }
-
-      // Save updated checkpoint
-      const checkpointData = {
-        completedTests: checkpoint.completedTests,
-        completedResults: checkpoint.completedResults,
-        accumulatedWallTime: accumulatedWallTime,
-        lastUpdated: new Date().toISOString(),
-        testCase: process.env.WPT_CASE || 'all'
-      };
-
-      fs.writeFileSync(checkpointFile, JSON.stringify(checkpointData, null, 2), 'utf8');
-    } catch (error) {
-      console.log(`⚠️ Warning: Could not save checkpoint: ${error.message}`);
-    }
-  }
-
-  clearCheckpoint(checkpointFile) {
-    const fs = require('fs');
-
-    try {
-      if (fs.existsSync(checkpointFile)) {
-        fs.unlinkSync(checkpointFile);
-        console.log('🗑️  Cleared previous checkpoint (fresh start)');
-      }
-    } catch (error) {
-      console.log(`⚠️ Warning: Could not clear checkpoint: ${error.message}`);
+      console.error(`❌ Failed to send email: ${error.message}`);
+      console.error(`   This is a non-critical error - test results are still available in the HTML report`);
     }
   }
 }
@@ -2431,6 +2427,9 @@ test.describe('WebNN Automation Tests', () => {
     fs.writeFileSync(reportPath, htmlReport, 'utf8');
     console.log(`\n📄 HTML Report saved to: ${reportPath}`);
 
+    // Store the timestamp for email subject (same as report filename)
+    const reportTimestamp = timestamp;
+
     // Attach the detailed HTML report AFTER assertions (appears after Test Steps)
     await testInfo.attach('📄 WebNN-Test-Report', {
       body: htmlReport,
@@ -2486,7 +2485,13 @@ test.describe('WebNN Automation Tests', () => {
     const finalSuiteSummary = testSuites.length > 1 ?
       `Suites: ${testSuites.join(', ')}` :
       `Suite: ${testSuites[0]}`;
-    console.log(`${finalSuiteSummary}, Cases: ${results.length}, Subcases: ${passedSubcasesForReport}/${totalSubcasesForReport} passed`);    // You can add more specific assertions based on your requirements
+    console.log(`${finalSuiteSummary}, Cases: ${results.length}, Subcases: ${passedSubcasesForReport}/${totalSubcasesForReport} passed`);
+
+    // Send email report if --email option was provided
+    const emailAddress = process.env.EMAIL_ADDRESS;
+    if (emailAddress) {
+      await runner.sendEmailReport(emailAddress, testSuites, results, overallWallTime, sumOfAllTestTimes, reportTimestamp);
+    }    // You can add more specific assertions based on your requirements
     // For example, expect a minimum pass rate:
     // expect(passedSubcasesForReport / totalSubcasesForReport).toBeGreaterThan(0.8);
   });

@@ -30,25 +30,21 @@ export default defineConfig({
 
     /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
     trace: 'on-first-retry',
-
+    
     /* Make browser visible during test execution */
     headless: false,
-  },
-
-  /* Configure projects for major browsers */
+  },  /* Configure projects for major browsers */
   projects: [
     {
       name: 'chromium-canary',
       use: {
-        ...devices['Desktop Chrome'],
-        // Use Chrome Canary with WebNN features enabled
+        // Use Chrome with WebNN features enabled
+        viewport: null,  // Use full window size
+        channel: process.env.CHROME_CHANNEL || 'chrome',
         launchOptions: {
-          executablePath: process.env.CHROME_CANARY_PATH || 'C:\\Users\\' + process.env.USERNAME + '\\AppData\\Local\\Google\\Chrome SxS\\Application\\chrome.exe',
           args: [
             '--enable-features=WebMachineLearningNeuralNetwork,WebNNOnnxRuntime',
-            '--disable-web-security',
-            '--disable-features=VizDisplayCompositor',
-            '--enable-unsafe-webgpu'
+            '--start-maximized'
           ]
         }
       },

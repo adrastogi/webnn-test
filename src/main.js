@@ -79,6 +79,22 @@ if (emailIndex !== -1) {
   }
 }
 
+// Find --chrome-channel argument
+const chromeChannelIndex = args.findIndex(arg => arg === '--chrome-channel');
+let chromeChannel = 'stable'; // default
+if (chromeChannelIndex !== -1 && chromeChannelIndex + 1 < args.length) {
+  chromeChannel = args[chromeChannelIndex + 1].toLowerCase();
+  const validChannels = ['stable', 'canary', 'dev', 'beta'];
+  if (!validChannels.includes(chromeChannel)) {
+    console.error(`Invalid --chrome-channel value: ${chromeChannel}`);
+    console.error(`Valid channels are: ${validChannels.join(', ')}`);
+    process.exit(1);
+  }
+}
+
+// Map 'stable' to 'chrome' for Playwright (Playwright uses 'chrome' not 'stable')
+const playwrightChannel = chromeChannel === 'stable' ? 'chrome' : `chrome-${chromeChannel}`;
+
 // Find --ep argument
 epFlag = args.includes('--ep');
 
@@ -93,6 +109,7 @@ if (invalidSuites.length > 0) {
 }
 
 console.log(`Running WebNN tests for suite(s): ${testSuite}`);
+console.log(`🌐 Chrome channel: ${chromeChannel}`);
 if (testCase) {
   console.log(`Running specific case: ${testCase}`);
 }
@@ -135,6 +152,7 @@ if (testCase) {
 }
 process.env.EP_FLAG = epFlag ? 'true' : 'false';
 process.env.JOBS = jobs.toString();
+process.env.CHROME_CHANNEL = playwrightChannel;
 
 // Pass --wpt-range and --pause as environment variables
 if (wptRange) {
@@ -174,6 +192,7 @@ function runTestIteration(iteration, totalIterations) {
       '--wpt-range', wptRange,
       '--pause', pauseCase,
       '--email', emailAddress,
+      '--chrome-channel', chromeChannel,
       '--ep',
       '--jobs', jobs.toString(),
       '--repeat', repeat.toString()
@@ -194,6 +213,7 @@ function runTestIteration(iteration, totalIterations) {
             prevArg === '--preview-case' ||
             prevArg === '--wpt-range' ||
             prevArg === '--pause' ||
+            prevArg === '--chrome-channel' ||
             prevArg === '--jobs' ||
             prevArg === '--repeat') {
           return false; // This is a value for a custom option, skip it

@@ -6,6 +6,21 @@ class WebNNTestRunner {
     this.epFlag = process.env.EP_FLAG === 'true';
   }
 
+  // Helper function to check if two results are identical (works for both PASS and FAIL)
+  compareTestResults(result1, result2) {
+    if (!result1 || !result2) return false;
+    if (result1.result !== result2.result) return false;
+
+    // Compare subcase counts
+    const sc1 = result1.subcases;
+    const sc2 = result2.subcases;
+    if (sc1.total !== sc2.total || sc1.passed !== sc2.passed || sc1.failed !== sc2.failed) {
+      return false;
+    }
+
+    return true;
+  }
+
   async restartBrowserAndContext(browserToClose) {
     if (browserToClose) {
       try {
@@ -810,25 +825,10 @@ class WebNNTestRunner {
           }
         }
 
-        // Helper function to check if two failure results are identical
-        const areFailuresIdentical = (result1, result2) => {
-          if (!result1 || !result2) return false;
-          if (result1.result !== result2.result) return false;
-
-          // Compare subcase counts
-          const sc1 = result1.subcases;
-          const sc2 = result2.subcases;
-          if (sc1.total !== sc2.total || sc1.passed !== sc2.passed || sc1.failed !== sc2.failed) {
-            return false;
-          }
-
-          return true;
-        };
-
         // If skipRetry is true, just return the result without retrying
         // This is used during initial test execution - retries happen later in a separate phase
         if (skipRetry) {
-          if (overallStatus !== 'PASS') {
+          if (overallStatus !== 'PASS' && retryCount === 0) {
             console.log(`⏭️  Test will be retried in sequential retry phase after all tests complete\n`);
           }
           return result;
@@ -841,7 +841,7 @@ class WebNNTestRunner {
         const shouldRetry = (
           overallStatus === 'UNKNOWN' ||
           overallStatus === 'ERROR' ||
-          (overallStatus === 'FAIL' && retryCount < maxRetries && !areFailuresIdentical(previousResult, result))
+          (overallStatus === 'FAIL' && retryCount < maxRetries && !this.compareTestResults(previousResult, result))
         );
 
         if (shouldRetry) {
@@ -850,7 +850,7 @@ class WebNNTestRunner {
             console.log(`🔄 ${overallStatus} results always retry - creating fresh browser context...\n`);
           } else if (overallStatus === 'FAIL' && previousResult && previousResult.result === 'FAIL') {
             // Check if this is the second consecutive identical failure
-            if (areFailuresIdentical(previousResult, result)) {
+            if (this.compareTestResults(previousResult, result)) {
               console.log(`\n✓ Test ${testName} has 2 consecutive identical failures - accepting result`);
               return result;
             }
@@ -1045,21 +1045,6 @@ class WebNNTestRunner {
       total: previousResult.subcases.total
     }];
 
-    // Helper function to check if two results are identical (works for both PASS and FAIL)
-    const areResultsIdentical = (result1, result2) => {
-      if (!result1 || !result2) return false;
-      if (result1.result !== result2.result) return false;
-
-      // Compare subcase counts
-      const sc1 = result1.subcases;
-      const sc2 = result2.subcases;
-      if (sc1.total !== sc2.total || sc1.passed !== sc2.passed || sc1.failed !== sc2.failed) {
-        return false;
-      }
-
-      return true;
-    };
-
     // Helper function to launch a new browser instance
     const tryLaunchNewBrowser = async () => {
       if (!launchNewBrowser || typeof launchNewBrowser !== 'function') {
@@ -1094,10 +1079,17 @@ class WebNNTestRunner {
         // Check against all previous entries (excluding the last one which is currentResult)
         for (let i = 0; i < retryHistory.length - 1; i++) {
           const prev = retryHistory[i];
-          if (prev.status === currentResult.result &&
-              prev.passed === currentResult.subcases.passed &&
-              prev.failed === currentResult.subcases.failed &&
-              prev.total === currentResult.subcases.total) {
+          // Construct a temporary result object for comparison
+          const prevResult = {
+            result: prev.status,
+            subcases: {
+              passed: prev.passed,
+              failed: prev.failed,
+              total: prev.total
+            }
+          };
+          
+          if (this.compareTestResults(prevResult, currentResult)) {
             return true;
           }
         }
@@ -1202,7 +1194,7 @@ class WebNNTestRunner {
         // Reset browser closed counter on success
         browserClosedAttempts = 0;
 
-        // Run the test without further recursive retries (skipRetry=false for this dedicated retry phase)
+        // Run the test without further recursive retries (skipRetry=true for this dedicated retry phase)
         const retryResult = await this.runSingleWptTest(
           retryPage,
           testFile,
@@ -1212,7 +1204,7 @@ class WebNNTestRunner {
           retryContext,
           currentBrowser || browser,
           currentResult,
-          false // Allow retries within this call
+          true // Disable internal retries, let this loop handle it
         );
 
         // Check if we should pause for this test case (configurable via --pause command line switch)
@@ -1274,7 +1266,7 @@ class WebNNTestRunner {
         // Check if we should continue based on result
         if (currentResult.result === 'PASS') {
           // For PASS, we need 2 consecutive identical passes
-          if (previousRetryResult && areResultsIdentical(previousRetryResult, currentResult)) {
+          if (previousRetryResult && this.compareTestResults(previousRetryResult, currentResult)) {
             console.log(`\n✅ Test ${testName} PASSED with 2 consecutive identical results on retry attempt ${retryCount}\n`);
             break;
           } else if (retryCount === 1) {

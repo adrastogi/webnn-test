@@ -69,7 +69,7 @@ class ModelRunner extends WebNNRunner {
     console.log('[Info] Running MODEL suite...');
 
     // Collect filter from various legacy env vars
-    const filterStr = process.env.MODEL_CASE || process.env.SAMPLE_CASE || process.env.DEMO_CASE || process.env.PREVIEW_CASE;
+    const filterStr = process.env.MODEL_CASE;
     let testKeys = [];
 
     if (filterStr) {

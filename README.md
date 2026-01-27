@@ -61,6 +61,30 @@ node src/main.js --suite wpt --wpt-range 0,1,3-7
 
 The case selection is case-insensitive and matches the prefix of the test filename.
 
+## Model Tests (Samples & Previews)
+
+Run tests against WebNN samples and developer previews using the `model` suite:
+
+```bash
+# Run all model tests
+node src/main.js --suite model
+
+# Run specific model cases
+node src/main.js --suite model --model-case lenet
+node src/main.js --suite model --model-case sdxl,whisper
+```
+
+Available model cases include:
+- `lenet`: LeNet Digit Recognition
+- `segmentation`: Semantic Segmentation
+- `style`: Fast Style Transfer
+- `od`: Object Detection
+- `ic`: Image Classification
+- `sdxl`: SDXL Turbo
+- `phi`: Phi-3 WebGPU
+- `sam`: Segment Anything
+- `whisper`: Whisper-base WebGPU
+
 ## Parallel Execution
 
 Run multiple tests in parallel to speed up execution:

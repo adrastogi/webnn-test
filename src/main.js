@@ -84,25 +84,12 @@ Examples:
   // Find suite-specific case arguments
   const wptCaseIndex = args.findIndex(arg => arg === '--wpt-case');
   const modelCaseIndex = args.findIndex(arg => arg === '--model-case');
-  // Legacy args
-  const sampleCaseIndex = args.findIndex(arg => arg === '--sample-case');
-  const demoCaseIndex = args.findIndex(arg => arg === '--demo-case');
-  const previewCaseIndex = args.findIndex(arg => arg === '--preview-case');
 
   if (wptCaseIndex !== -1 && wptCaseIndex + 1 < args.length) {
     testCase = args[wptCaseIndex + 1];
   }
   if (modelCaseIndex !== -1 && modelCaseIndex + 1 < args.length) {
     testCase = args[modelCaseIndex + 1];
-  }
-  if (sampleCaseIndex !== -1 && sampleCaseIndex + 1 < args.length) {
-    testCase = args[sampleCaseIndex + 1];
-  }
-  if (demoCaseIndex !== -1 && demoCaseIndex + 1 < args.length) {
-    testCase = args[demoCaseIndex + 1];
-  }
-  if (previewCaseIndex !== -1 && previewCaseIndex + 1 < args.length) {
-    testCase = args[previewCaseIndex + 1];
   }
 
   // Find --wpt-range argument
@@ -152,7 +139,7 @@ Examples:
   epFlag = args.includes('--ep');
 
   // Validate test suites (support comma-separated list)
-  const validSuites = ['wpt', 'sample', 'preview', 'demo', 'model'];
+  const validSuites = ['wpt', 'model'];
   let suiteList = testSuite.split(',').map(s => s.trim()).filter(s => s.length > 0);
 
   // Handle 'all' keyword - expand to all supported suites
@@ -198,15 +185,6 @@ Examples:
   }
   if (modelCaseIndex !== -1 && modelCaseIndex + 1 < args.length) {
     process.env.MODEL_CASE = args[modelCaseIndex + 1];
-  }
-  if (sampleCaseIndex !== -1 && sampleCaseIndex + 1 < args.length) {
-    process.env.SAMPLE_CASE = args[sampleCaseIndex + 1];
-  }
-  if (demoCaseIndex !== -1 && demoCaseIndex + 1 < args.length) {
-    process.env.DEMO_CASE = args[demoCaseIndex + 1];
-  }
-  if (previewCaseIndex !== -1 && previewCaseIndex + 1 < args.length) {
-    process.env.PREVIEW_CASE = args[previewCaseIndex + 1];
   }
 
   // Keep legacy TEST_CASE for backward compatibility
@@ -269,7 +247,7 @@ Examples:
                      files.forEach((f, i) => console.log(`[${i}] ${f}`));
                      console.log(`Total: ${files.length} tests`);
                  }
-                 else if (['demo', 'sample', 'preview', 'model'].includes(suite)) {
+                 else if (suite === 'model') {
                      const runner = new ModelRunner(page);
                      console.log(`Listing ${suite.toUpperCase()} tests (Static List):`);
                      Object.keys(runner.models).forEach((k, i) => {
@@ -289,7 +267,6 @@ Examples:
              process.exit(1);
          }
      })();
-     return; // Stop main execution
   }
 
   // Function to run a single test iteration
@@ -314,9 +291,7 @@ Examples:
       const customOptions = [
         '--suite', testSuite,
         '--wpt-case', testCase,
-        '--sample-case', testCase,
-        '--demo-case', testCase,
-        '--preview-case', testCase,
+        '--model-case', testCase,
         '--wpt-range', wptRange,
         '--pause', pauseCase,
         '--email', emailAddress,
@@ -337,9 +312,7 @@ Examples:
           const prevArg = args[argPosition - 1];
           if (prevArg === '--suite' ||
               prevArg === '--wpt-case' ||
-              prevArg === '--sample-case' ||
-              prevArg === '--demo-case' ||
-              prevArg === '--preview-case' ||
+              prevArg === '--model-case' ||
               prevArg === '--wpt-range' ||
               prevArg === '--pause' ||
               prevArg === '--chrome-channel' ||
@@ -449,6 +422,7 @@ Examples:
   }
 
   // Main execution: run tests with repeat support
+  if (process.env.LIST_MODE !== 'true') {
   (async () => {
     try {
       const allResults = [];
@@ -464,6 +438,7 @@ Examples:
       process.exit(typeof error === 'number' ? error : 1);
     }
   })();
+  }
 } else {
 
 // -------------------------------------------------------------
@@ -599,7 +574,7 @@ test.describe('WebNN Tests', () => {
             if (suite === 'wpt') {
                 currentRunner = new WptRunner(page);
                 currentRunner.launchNewBrowser = launcher;
-            } else if (['preview', 'sample', 'demo', 'model'].includes(suite)) {
+            } else if (suite === 'model') {
                 currentRunner = new ModelRunner(page);
                 currentRunner.launchNewBrowser = launcher;
             } else {
@@ -618,7 +593,7 @@ test.describe('WebNN Tests', () => {
 
             if (suite === 'wpt') {
                  suiteResults = await currentRunner.runWptTests(context, browser);
-            } else if (['preview', 'sample', 'demo', 'model'].includes(suite)) {
+            } else if (suite === 'model') {
                  suiteResults = await currentRunner.runModelTests();
             }
 
@@ -640,7 +615,7 @@ test.describe('WebNN Tests', () => {
 
             // Generate HTML
             // Note: Use env vars for subtitle if available
-            const caseName = process.env.WPT_CASE || process.env.MODEL_CASE || process.env.PREVIEW_CASE || process.env.SAMPLE_CASE;
+            const caseName = process.env.WPT_CASE || process.env.MODEL_CASE;
 
             const suitesLabel = suites.join('_');
             const report = runner.generateHtmlReport(suites, caseName, results, dllResults, wallTime, sumOfTestTimes);

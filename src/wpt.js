@@ -114,7 +114,10 @@ class WptRunner extends WebNNRunner {
                                                e.message.includes('Protocol error') ||
                                                e.message.includes('Target.createTarget') ||
                                                e.message.includes('Target.close') ||
-                                               e.message.includes('browserContext.newPage');
+                                               e.message.includes('browserContext.newPage') ||
+                                               e.message.includes('Target closed') ||
+                                               e.message.includes('Timeout') ||
+                                               e.name === 'TimeoutError';
 
                          // Handle Critical Context Errors (GPU, Protocol, Harness, etc.)
                          if (isCriticalError) {
@@ -128,8 +131,8 @@ class WptRunner extends WebNNRunner {
                                  testName: testFile, // Fallback name
                                  fileName: testFile,
                                  suite: 'WPT',
-                                 result: 'ERROR',
-                                 subcases: {total:0, passed:0, failed:0},
+                                 result: 'FAIL',
+                                 subcases: {total:1, passed:0, failed:1},
                                  error: errorType
                              });
 
@@ -287,7 +290,7 @@ class WptRunner extends WebNNRunner {
     }
     console.log(`${logPrefix}: ${testName}`);
 
-    try {
+    const runTest = async () => {
         await page.goto(testUrl, { waitUntil: 'networkidle', timeout: 60000 });
 
         // check if encounter gpu context error or harness error
@@ -401,7 +404,7 @@ class WptRunner extends WebNNRunner {
             return { result: resultStatus, subcases };
         });
 
-        console.log(`   ${resData.result}: ${resData.subcases.passed} PASS, ${resData.subcases.failed} FAIL`);
+        console.log(`[${testName}] ${resData.result}: ${resData.subcases.passed} PASS, ${resData.subcases.failed} FAIL`);
 
         return {
             testName,
@@ -411,8 +414,25 @@ class WptRunner extends WebNNRunner {
             subcases: resData.subcases,
             executionTime: '0.00'
         };
+    };
 
+    try {
+        // Enforce 1 minute global timeout for the test case
+        return await Promise.race([
+            runTest(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout 60000ms exceeded')), 60000))
+        ]);
     } catch (e) {
+        // Rethrow critical errors to trigger browser restart in chunkedExec
+        if (e.message.includes('Timeout') ||
+            e.message.includes('Target closed') ||
+            e.message.includes('Protocol error') ||
+            e.message.includes('GPUContextCreationError') ||
+            e.message.includes('HarnessError') ||
+            e.name === 'TimeoutError') {
+            throw e;
+        }
+
         return {
             testName,
             suite: 'WPT',

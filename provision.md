@@ -1,20 +1,22 @@
-* Install WinAppRuntime
+# Install WinAppRuntime
 https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads
 Install as an Administrator
 
-* Install EPs
+# Install EPs
 ExecutionProviderCatalog.exe
 
 WindowsAppSDK\dev\DynamicDependency\Powershell
 EnsureWinMLExecutionProviders.ps1
 
-* Check
+# Install Chrome
+
+# Check ORT
 DumpPackages.ps1 and search for WindowsAppRuntime
 
-* Check EP
+# Check ORT at runtime
 Listdlls64.exe -v chrome.exe | findstr /i "onnxruntime.*.dll"
 
-* Delete
+* Delete ORT
 \\edgefs\users\rcintron\scripts\Remove-PackagesByWildcard.ps1
 Remove-AppxPackage -Package '<package_full_name>'
 

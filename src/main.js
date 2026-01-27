@@ -7,8 +7,7 @@ const os = require('os');
 const { test, expect, chromium } = require('@playwright/test');
 
 const { WptRunner } = require('./wpt');
-const { PreviewRunner } = require('./preview');
-const { DemoRunner } = require('./demo');
+const { ModelRunner } = require('./model');
 
 if (require.main === module) {
   // Parse command line arguments
@@ -22,7 +21,7 @@ WebNN Automation Tests
 Usage: node src/main.js [options]
 
 Options:
-  --suite <name>           Test suite to run (default: wpt). Values: wpt, sample, demo, preview
+  --suite <name>           Test suite to run (default: wpt). Values: wpt, model
   --list                   List all test cases in the specified suite
   --jobs <number>          Number of parallel jobs (default: 4)
   --repeat <number>        Number of times to repeat the test run (default: 1)
@@ -33,9 +32,7 @@ Options:
 Test Selection:
   --wpt-case <filter>      Run specific WPT test cases (comma-separated prefix)
   --wpt-range <range>      Run tests by index range (e.g., 0,1,3-7)
-  --sample-case <filter>   Run specific Sample cases
-  --demo-case <filter>     Run specific Demo cases
-  --preview-case <filter>  Run specific Preview cases
+  --model-case <filter>    Run specific Model cases (e.g., lenet, sdxl)
 
 Examples:
   node src/main.js --suite wpt --wpt-case abs
@@ -86,12 +83,17 @@ Examples:
 
   // Find suite-specific case arguments
   const wptCaseIndex = args.findIndex(arg => arg === '--wpt-case');
+  const modelCaseIndex = args.findIndex(arg => arg === '--model-case');
+  // Legacy args
   const sampleCaseIndex = args.findIndex(arg => arg === '--sample-case');
   const demoCaseIndex = args.findIndex(arg => arg === '--demo-case');
   const previewCaseIndex = args.findIndex(arg => arg === '--preview-case');
 
   if (wptCaseIndex !== -1 && wptCaseIndex + 1 < args.length) {
     testCase = args[wptCaseIndex + 1];
+  }
+  if (modelCaseIndex !== -1 && modelCaseIndex + 1 < args.length) {
+    testCase = args[modelCaseIndex + 1];
   }
   if (sampleCaseIndex !== -1 && sampleCaseIndex + 1 < args.length) {
     testCase = args[sampleCaseIndex + 1];
@@ -150,12 +152,12 @@ Examples:
   epFlag = args.includes('--ep');
 
   // Validate test suites (support comma-separated list)
-  const validSuites = ['wpt', 'sample', 'preview', 'demo'];
+  const validSuites = ['wpt', 'sample', 'preview', 'demo', 'model'];
   let suiteList = testSuite.split(',').map(s => s.trim()).filter(s => s.length > 0);
 
   // Handle 'all' keyword - expand to all supported suites
   if (suiteList.includes('all')) {
-      suiteList = ['wpt', 'preview', 'demo'];
+      suiteList = ['wpt', 'model'];
       testSuite = suiteList.join(',');
   }
 
@@ -193,6 +195,9 @@ Examples:
   // Set suite-specific case environment variables
   if (wptCaseIndex !== -1 && wptCaseIndex + 1 < args.length) {
     process.env.WPT_CASE = args[wptCaseIndex + 1];
+  }
+  if (modelCaseIndex !== -1 && modelCaseIndex + 1 < args.length) {
+    process.env.MODEL_CASE = args[modelCaseIndex + 1];
   }
   if (sampleCaseIndex !== -1 && sampleCaseIndex + 1 < args.length) {
     process.env.SAMPLE_CASE = args[sampleCaseIndex + 1];
@@ -264,15 +269,13 @@ Examples:
                      files.forEach((f, i) => console.log(`[${i}] ${f}`));
                      console.log(`Total: ${files.length} tests`);
                  }
-                 else if (suite === 'demo' || suite === 'sample') {
-                     const cases = ['lenet', 'segmentation', 'style', 'od'];
+                 else if (['demo', 'sample', 'preview', 'model'].includes(suite)) {
+                     const runner = new ModelRunner(page);
                      console.log(`Listing ${suite.toUpperCase()} tests (Static List):`);
-                     cases.forEach((c, i) => console.log(`[${i}] ${c}`));
-                 }
-                 else if (suite === 'preview') {
-                    const cases = ['ic', 'sdxl', 'phi', 'sam', 'whisper'];
-                    console.log(`Listing ${suite.toUpperCase()} tests (Static List):`);
-                    cases.forEach((c, i) => console.log(`[${i}] ${c}`));
+                     Object.keys(runner.models).forEach((k, i) => {
+                         const m = runner.models[k];
+                         console.log(`[${i}] ${k}: ${m.name} (${m.type})`);
+                     });
                  }
                  else {
                     console.log(`[Warning] Listing not supported for suite: ${suite}`);
@@ -596,11 +599,8 @@ test.describe('WebNN Tests', () => {
             if (suite === 'wpt') {
                 currentRunner = new WptRunner(page);
                 currentRunner.launchNewBrowser = launcher;
-            } else if (suite === 'preview') {
-                currentRunner = new PreviewRunner(page);
-                currentRunner.launchNewBrowser = launcher;
-            } else if (suite === 'sample' || suite === 'demo') {
-                currentRunner = new DemoRunner(page);
+            } else if (['preview', 'sample', 'demo', 'model'].includes(suite)) {
+                currentRunner = new ModelRunner(page);
                 currentRunner.launchNewBrowser = launcher;
             } else {
                 console.error(`Unknown suite: ${suite}`);
@@ -618,10 +618,8 @@ test.describe('WebNN Tests', () => {
 
             if (suite === 'wpt') {
                  suiteResults = await currentRunner.runWptTests(context, browser);
-            } else if (suite === 'preview') {
-                 suiteResults = await currentRunner.runPreviewTests();
-            } else if (suite === 'sample' || suite === 'demo') {
-                 suiteResults = await currentRunner.runSamplesTests();
+            } else if (['preview', 'sample', 'demo', 'model'].includes(suite)) {
+                 suiteResults = await currentRunner.runModelTests();
             }
 
             // Keep reference to a runner for reporting
@@ -642,7 +640,7 @@ test.describe('WebNN Tests', () => {
 
             // Generate HTML
             // Note: Use env vars for subtitle if available
-            const caseName = process.env.WPT_CASE || process.env.PREVIEW_CASE || process.env.SAMPLE_CASE;
+            const caseName = process.env.WPT_CASE || process.env.MODEL_CASE || process.env.PREVIEW_CASE || process.env.SAMPLE_CASE;
 
             const suitesLabel = suites.join('_');
             const report = runner.generateHtmlReport(suites, caseName, results, dllResults, wallTime, sumOfTestTimes);

@@ -163,9 +163,9 @@ class WebNNRunner {
     return { browser: newBrowser, context: newContext, page: newPage };
   }
 
-  async checkOnnxruntimeDlls(processName = 'chrome.exe') {
+  async checkOnnxruntimeDlls(processName = 'chrome.exe', retries = 3) {
     return new Promise((resolve) => {
-      console.log(`[Info] Checking for ONNX Runtime DLLs in ${processName} process...`);
+      console.log(`[Info] Checking for ONNX Runtime DLLs in ${processName} process... (Attempts remaining: ${retries + 1})`);
 
       // Construct path to Listdlls64.exe in tools folder
       // We use __dirname to be relative to src/util.js, going up to root then tools
@@ -178,10 +178,17 @@ class WebNNRunner {
 
       console.log(`Running command: ${command}`);
       const { exec } = require('child_process');
-      exec(command, { encoding: 'utf8', timeout: 60000 }, (error, stdout, stderr) => {
+      exec(command, { encoding: 'utf8', timeout: 60000 }, async (error, stdout, stderr) => {
         if (error) {
            console.log(`[Warning] Error/No output checking ONNX Runtime DLLs: ${error.message}`);
-           resolve({ found: false, error: error.message });
+
+           if (retries > 0) {
+               console.log(`[Info] Retrying DLL check...`);
+               await new Promise(r => setTimeout(r, 2000));
+               resolve(this.checkOnnxruntimeDlls(processName, retries - 1));
+           } else {
+               resolve({ found: false, error: error.message });
+           }
            return;
         }
 
@@ -198,8 +205,13 @@ class WebNNRunner {
                console.log(cleanOutput);
                resolve({ found: true, dlls: cleanOutput, dllCount: dllLines.length });
            } else {
-               console.log(`[Fail] No ONNX Runtime DLL files found in ${processName} process (verified content)`);
-               resolve({ found: false, dlls: '', reason: 'No .dll files in output' });
+               if (retries > 0) {
+                   console.log(`[Info] No DLLs found in output, retrying...`);
+                   await new Promise(r => setTimeout(r, 2000));
+                   resolve(this.checkOnnxruntimeDlls(processName, retries - 1));
+               } else {
+                   resolve({ found: false, error: 'No onnxruntime DLLs found in output' });
+               }
            }
         } else {
             console.log(`[Fail] No ONNX Runtime DLL files found in ${processName} process`);

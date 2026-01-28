@@ -152,7 +152,7 @@ Examples:
       for (const d of devices) {
           for (const s of suites) {
               runConfigs.push({
-                  name: `${s}_${d}`,
+                  name: 'Default',
                   suite: s,
                   device: d,
                   browserArgs: globalExtraArgs,

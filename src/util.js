@@ -221,6 +221,59 @@ ${content}
     return { name, driver_date, driver_ver, device_id, vendor_id };
   }
 
+  function get_cpu_info() {
+    try {
+        if (os.platform() === 'win32') {
+             const cmd = 'powershell -c "Get-CimInstance -ClassName Win32_Processor | Select-Object -ExpandProperty Name"';
+             const cpuName = execSync(cmd, { encoding: 'utf8' }).trim();
+             return cpuName;
+        } else {
+             const cpus = os.cpus();
+             if (cpus && cpus.length > 0) {
+                 return cpus[0].model;
+             }
+        }
+    } catch(e) {
+        console.log('Failed to get CPU info:', e.message);
+    }
+    return 'Unknown CPU';
+  }
+
+  function get_npu_info() {
+     let name = '';
+     let driver_date = '';
+     let driver_ver = '';
+     try {
+        if (os.platform() === 'win32') {
+            // Try to find NPU devices from PnP entities.
+            // Common potential names: "Intel(R) AI Boost", "LNP", "NPU"
+            // We use Win32_PnPSignedDriver and sort by DriverDate descending to ensure we get the latest driver
+            // if multiple matched entries exist (e.g. old versions or multiple components).
+            const cmd = 'powershell -c "Get-CimInstance Win32_PnPSignedDriver | Where-Object { $_.DeviceName -match \'NPU|AI Boost|Hexagon|Movidius\' } | Sort-Object -Property DriverDate -Descending | Select-Object DeviceName, DriverVersion, @{N=\'DriverDate\';E={if($_.DriverDate){([datetime]$_.DriverDate).ToString(\'yyyy/MM/dd\')}}} | ConvertTo-Json -Compress"';
+            const output = execSync(cmd, { encoding: 'utf8' }).trim();
+            if (output) {
+                let npu = null;
+                try {
+                    const parsed = JSON.parse(output);
+                    // could be array (multiple devices/versions) or single object
+                    // Since we sorted Descending, the first element (if array) is the latest.
+                    npu = Array.isArray(parsed) ? parsed[0] : parsed;
+                } catch(e) { /* ignore */ }
+
+                if (npu) {
+                    name = npu.DeviceName || 'Unknown NPU';
+                    driver_ver = npu.DriverVersion || '';
+                    driver_date = _format_driver_date(npu.DriverDate);
+                }
+            }
+        }
+     } catch(e) {
+         console.log('Failed to get NPU info:', e.message);
+     }
+     if (!name) return 'Unknown NPU';
+     return { name, driver_ver, driver_date };
+  }
+
 async function launchBrowser() {
     // Using flags found in current file + persistent context logic
     const args = [
@@ -539,9 +592,25 @@ class WebNNRunner {
       testSuites.map(s => s.toUpperCase()).join(', ') :
       testSuites[0].toUpperCase();
 
-    // Add GPU info if any test ran on GPU
+    // Device Info (CPU, GPU, NPU)
+    let deviceInfoHtml = '';
+
+    // CPU Info (if any test ran on cpu)
+    const hasCpuTest = results.some(r => r.device === 'cpu');
+    if (hasCpuTest) {
+        const cpuName = get_cpu_info();
+        deviceInfoHtml += `
+        <div style="background-color: #e8f5e9; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #a5d6a7;">
+            <h3 style="margin-top: 0; color: #2e7d32;">CPU Information</h3>
+            <div style="display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;">
+                <div style="font-weight: bold; color: #1b5e20;">CPU Name:</div>
+                <div>${cpuName}</div>
+            </div>
+        </div>`;
+    }
+
+    // GPU Info (if any test ran on gpu)
     const hasGpuTest = results.some(r => r.device === 'gpu');
-    let gpuInfoHtml = '';
     if (hasGpuTest) {
         let gpuName = 'Unknown GPU';
         let gpuDriverDate = '';
@@ -557,8 +626,8 @@ class WebNNRunner {
             console.log('[Warning] Could not retrieve GPU info:', e.message);
         }
 
-        gpuInfoHtml = `
-        <div style="background: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #90caf9;">
+        deviceInfoHtml += `
+        <div style="background-color: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #90caf9;">
             <h3 style="margin-top: 0; color: #0d47a1;">GPU Information</h3>
             <div style="display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;">
                 <div style="font-weight: bold; color: #1565c0;">GPU Name:</div>
@@ -571,6 +640,38 @@ class WebNNRunner {
         </div>`;
     }
 
+    // NPU Info (if any test ran on npu)
+    const hasNpuTest = results.some(r => r.device === 'npu');
+    if (hasNpuTest) {
+        let npuName = 'Unknown NPU';
+        let npuDriverVer = '';
+        let npuDriverDate = '';
+        try {
+             const info = get_npu_info();
+             // get_npu_info returns object { name, driver_ver, driver_date } or string (old behavior backup)
+             if (typeof info === 'string') {
+                 if (info !== 'Unknown NPU') npuName = info;
+             } else if (info && info.name) {
+                 npuName = info.name;
+                 npuDriverVer = info.driver_ver;
+                 npuDriverDate = info.driver_date;
+             }
+        } catch(e) {
+             console.log('[Warning] Could not retrieve NPU info:', e.message);
+        }
+
+        deviceInfoHtml += `
+        <div style="background-color: #f3e5f5; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #ce93d8;">
+            <h3 style="margin-top: 0; color: #7b1fa2;">NPU Information</h3>
+             <div style="display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;">
+                <div style="font-weight: bold; color: #4a148c;">NPU Name:</div>
+                <div>${npuName}</div>
+                ${npuDriverDate ? `<div style="font-weight: bold; color: #4a148c;">Driver Date:</div><div>${npuDriverDate}</div>` : ''}
+                ${npuDriverVer ? `<div style="font-weight: bold; color: #4a148c;">Driver Version:</div><div>${npuDriverVer}</div>` : ''}
+            </div>
+        </div>`;
+    }
+
     return `
 <!DOCTYPE html>
 <html>
@@ -579,71 +680,71 @@ class WebNNRunner {
     <title>WebNN Test Report - ${suiteTitle}</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; }
-        .header { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .header { background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
         .summary { margin-bottom: 20px; }
-        .stat-card { background: white; border: 1px solid #e1e4e8; border-radius: 6px; padding: 15px; text-align: center; display: inline-block; margin: 5px; min-width: 150px; }
+        .stat-card { background-color: white; border: 1px solid #e1e4e8; border-radius: 6px; padding: 15px; text-align: center; display: inline-block; margin: 5px; min-width: 150px; }
         .stat-number { font-size: 24px; font-weight: bold; margin-bottom: 5px; }
         .stat-label { color: #586069; font-size: 14px; }
         .pass { color: #28a745; } .fail { color: #dc3545; } .error { color: #fd7e14; }
         table { width: 100%; border-collapse: collapse; margin: 20px 0; }
         th, td { border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; }
-        th { background: #f6f8fa; font-weight: 600; }
+        th { background-color: #f6f8fa; font-weight: 600; }
         .status-pass { color: #28a745; font-weight: bold; }
         .status-fail { color: #dc3545; font-weight: bold; }
         .status-error { color: #fd7e14; font-weight: bold; }
         .details { margin-top: 20px; }
         .case-details { margin: 15px 0; padding: 15px; border: 1px solid #e1e4e8; border-radius: 6px; }
-        .subcase { margin: 5px 0; padding: 5px; background: #f8f9fa; border-radius: 3px; }
+        .subcase { margin: 5px 0; padding: 5px; background-color: #f8f9fa; border-radius: 3px; }
     </style>
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background-color: #ffffff;">
-    <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #e1e4e8;">
+    <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #e1e4e8;">
         <h1 style="margin: 0; color: #24292e;">WebNN Test Report</h1>
     </div>
 
-    ${gpuInfoHtml}
+    ${deviceInfoHtml}
 
     <div style="margin-bottom: 20px;">
         <h3>Summary</h3>
         <table style="width: 100%; border-collapse: separate; border-spacing: 12px; margin-bottom: 20px;">
             <tr>
-                <td style="text-align: center; padding: 20px; background: #ffffff; border: 1px solid #e1e4e8; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); width: 33%;">
+                <td style="text-align: center; padding: 20px; background-color: #ffffff; border: 1px solid #e1e4e8; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); width: 33%;">
                     <div style="font-size: 28px; font-weight: bold; margin-bottom: 8px; color: #24292e;">${results.length}</div>
                     <div style="color: #586069; font-size: 14px; font-weight: 500;">Total Cases</div>
                 </td>
-                <td style="text-align: center; padding: 20px; background: #ffffff; border: 1px solid #e1e4e8; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); width: 33%;">
+                <td style="text-align: center; padding: 20px; background-color: #ffffff; border: 1px solid #e1e4e8; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); width: 33%;">
                     <div style="font-size: 28px; font-weight: bold; margin-bottom: 8px; color: #24292e;">${totalSubcases}</div>
                     <div style="color: #586069; font-size: 14px; font-weight: 500;">Total Subcases</div>
                 </td>
-                <td style="text-align: center; padding: 20px; background: #ffffff; border: 1px solid #e1e4e8; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); width: 33%;">
+                <td style="text-align: center; padding: 20px; background-color: #ffffff; border: 1px solid #e1e4e8; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); width: 33%;">
                     <div style="font-size: 28px; font-weight: bold; margin-bottom: 8px; color: ${((passedSubcases/totalSubcases)*100) >= 100 ? '#28a745' : '#24292e'};">${Math.floor(((passedSubcases/totalSubcases)*100)*10)/10}%</div>
                     <div style="color: #586069; font-size: 14px; font-weight: 500;">Success Rate</div>
                 </td>
             </tr>
             <tr>
-                <td style="text-align: center; padding: 20px; background: #f0fff4; border: 1px solid #c3e6cb; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                <td style="text-align: center; padding: 20px; background-color: #f0fff4; border: 1px solid #c3e6cb; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
                     <div style="font-size: 28px; font-weight: bold; margin-bottom: 8px; color: #28a745;">${passed}</div>
                     <div style="color: #586069; font-size: 14px; font-weight: 500;">Passed Cases</div>
                 </td>
-                <td style="text-align: center; padding: 20px; background: #f0fff4; border: 1px solid #c3e6cb; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                <td style="text-align: center; padding: 20px; background-color: #f0fff4; border: 1px solid #c3e6cb; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
                     <div style="font-size: 28px; font-weight: bold; margin-bottom: 8px; color: #28a745;">${passedSubcases}</div>
                     <div style="color: #586069; font-size: 14px; font-weight: 500;">Passed Subcases</div>
                 </td>
-                <td style="text-align: center; padding: 20px; background: #ffffff; border: 1px solid #e1e4e8; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                <td style="text-align: center; padding: 20px; background-color: #ffffff; border: 1px solid #e1e4e8; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
                     <div style="font-size: 28px; font-weight: bold; margin-bottom: 8px; color: #586069;">${displayWallTime}s</div>
                     <div style="color: #586069; font-size: 14px; font-weight: 500;">Wall Time</div>
                 </td>
             </tr>
             <tr>
-                <td style="text-align: center; padding: 20px; background: ${failed > 0 ? '#fff5f5' : '#ffffff'}; border: 1px solid ${failed > 0 ? '#f5c6cb' : '#e1e4e8'}; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                <td style="text-align: center; padding: 20px; background-color: ${failed > 0 ? '#fff5f5' : '#ffffff'}; border: 1px solid ${failed > 0 ? '#f5c6cb' : '#e1e4e8'}; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
                     <div style="font-size: 28px; font-weight: bold; margin-bottom: 8px; color: ${failed > 0 ? '#dc3545' : '#586069'};">${failed}</div>
                     <div style="color: #586069; font-size: 14px; font-weight: 500;">Failed Cases</div>
                 </td>
-                <td style="text-align: center; padding: 20px; background: ${failedSubcases > 0 ? '#fff5f5' : '#ffffff'}; border: 1px solid ${failedSubcases > 0 ? '#f5c6cb' : '#e1e4e8'}; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                <td style="text-align: center; padding: 20px; background-color: ${failedSubcases > 0 ? '#fff5f5' : '#ffffff'}; border: 1px solid ${failedSubcases > 0 ? '#f5c6cb' : '#e1e4e8'}; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
                     <div style="font-size: 28px; font-weight: bold; margin-bottom: 8px; color: ${failedSubcases > 0 ? '#dc3545' : '#586069'};">${failedSubcases}</div>
                     <div style="color: #586069; font-size: 14px; font-weight: 500;">Failed Subcases</div>
                 </td>
-                <td style="text-align: center; padding: 20px; background: #ffffff; border: 1px solid #e1e4e8; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                <td style="text-align: center; padding: 20px; background-color: #ffffff; border: 1px solid #e1e4e8; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
                     <div style="font-size: 28px; font-weight: bold; margin-bottom: 8px; color: #586069;">${displaySumOfTimes}s</div>
                     <div style="color: #586069; font-size: 14px; font-weight: 500;">Sum of Test Times</div>
                 </td>
@@ -662,7 +763,7 @@ class WebNNRunner {
 
         return Object.keys(resultsByConfig).map(configName => {
             const groupResults = resultsByConfig[configName];
-            
+
             // Extract configuration info for display
             // Since a group might contain results from multiple split configs (e.g. diff devices),
             // we should collect unique values.
@@ -678,12 +779,12 @@ class WebNNRunner {
             const modelCaseStr = uniqueConfigValues('modelCase');
 
             let configDisplay = `
-            <div style="background: #f1f8ff; border: 1px solid #c8e1ff; padding: 10px; border-radius: 6px; margin: 10px 0 20px 0; font-size: 14px;">
+            <div style="background-color: #f1f8ff; border: 1px solid #c8e1ff; padding: 10px; border-radius: 6px; margin: 10px 0 20px 0; font-size: 14px;">
                 <h4 style="margin: 0 0 10px 0; color: #0366d6;">Configuration Details: ${configName}</h4>
                 <div style="display: grid; grid-template-columns: auto 1fr; gap: 8px;">
                     <div style="font-weight: bold; color: #24292e;">Suite:</div><div>${suiteStr.toUpperCase()}</div>
                     <div style="font-weight: bold; color: #24292e;">Device:</div><div>${deviceStr}</div>
-                    ${argsStr !== 'N/A' ? `<div style="font-weight: bold; color: #24292e;">Browser Args:</div><div style="font-family: monospace; background: #fafbfc; padding: 2px 4px; border-radius: 3px;">${argsStr}</div>` : ''}
+                    ${argsStr !== 'N/A' ? `<div style="font-weight: bold; color: #24292e;">Browser Args:</div><div style="font-family: monospace; background-color: #fafbfc; padding: 2px 4px; border-radius: 3px;">${argsStr}</div>` : ''}
                     ${wptCaseStr !== 'N/A' ? `<div style="font-weight: bold; color: #24292e;">WPT Case:</div><div>${wptCaseStr}</div>` : ''}
                      ${modelCaseStr !== 'N/A' ? `<div style="font-weight: bold; color: #24292e;">Model Case:</div><div>${modelCaseStr}</div>` : ''}
                 </div>
@@ -695,15 +796,16 @@ class WebNNRunner {
             <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-family: sans-serif;">
                 <thead>
                     <tr>
-                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Suite</th>
-                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Case</th>
-                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Status</th>
-                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Passed Subcases</th>
-                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Failed Subcases</th>
-                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Total Subcases</th>
-                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Success Rate</th>
-                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Retries</th>
-                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Execution Time</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Device</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Suite</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Case</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Status</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Passed Subcases</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Failed Subcases</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Total Subcases</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Success Rate</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Retries</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Execution Time</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -716,16 +818,17 @@ class WebNNRunner {
 
                       return `
                         <tr>
+                            <td style="${baseTdStyle}"><strong>${(result.device || 'N/A').toUpperCase()}</strong></td>
                             <td style="${baseTdStyle}"><strong>${(result.suite || 'N/A').toUpperCase()}</strong></td>
                             <td style="${baseTdStyle}">
                                 <strong>${result.testName}</strong>
                                 ${result.testUrl ? `<br><small><a href="${result.testUrl}" target="_blank" style="color: #0366d6;">${result.testUrl}</a></small>` : ''}
-                                ${result.details && !result.details.includes('Exception') ? `<br><div style="margin-top:4px; font-size: 0.9em; color: #24292e; background: #e6ffed; padding: 5px; border-left: 3px solid #28a745; border-radius: 2px;">${result.details}</div>` : ''}
-                                ${result.fullText && result.hasErrors ? `<br><div style="margin-top:4px; font-size: 0.9em; color: #a00; background: #fff0f0; padding: 5px; border-left: 3px solid #a00; border-radius: 2px;">${result.fullText}</div>` : ''}
+                                ${result.details && !result.details.includes('Exception') ? `<br><div style="margin-top:4px; font-size: 0.9em; color: #24292e; background-color: #e6ffed; padding: 5px; border-left: 3px solid #28a745; border-radius: 2px;">${result.details}</div>` : ''}
+                                ${result.fullText && result.hasErrors ? `<br><div style="margin-top:4px; font-size: 0.9em; color: #a00; background-color: #fff0f0; padding: 5px; border-left: 3px solid #a00; border-radius: 2px;">${result.fullText}</div>` : ''}
                                 ${result.retryHistory && result.retryHistory.length > 1 ? `
                                 <br><details style="margin-top: 5px;">
                                     <summary style="cursor: pointer; color: #0366d6; font-size: 12px;">View Retry History (${retryCount} attempts)</summary>
-                                    <div style="margin-top: 5px; padding: 10px; background: #f6f8fa; border-radius: 4px;">
+                                    <div style="margin-top: 5px; padding: 10px; background-color: #f6f8fa; border-radius: 4px;">
                                         ${result.retryHistory.map((attempt, idx) => `
                                             <div style="margin: 3px 0; font-size: 11px;">
                                                 <strong>${idx === 0 ? 'Initial Run' : 'Retry ' + idx}:</strong>
@@ -747,8 +850,8 @@ class WebNNRunner {
                         </tr>
                       `;
                     }).join('')}
-                    <tr style="background: #e8f5e9; font-weight: bold;">
-                        <td colspan="3" style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;"><strong>TOTAL (${configName})</strong></td>
+                    <tr style="background-color: #e8f5e9; font-weight: bold;">
+                        <td colspan="4" style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;"><strong>TOTAL (${configName})</strong></td>
                         <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; color: #28a745;"><strong>${groupResults.reduce((s,r)=>s+r.subcases.passed,0)}</strong></td>
                         <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; color: #dc3545;"><strong>${groupResults.reduce((s,r)=>s+r.subcases.failed,0)}</strong></td>
                         <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;"><strong>${groupResults.reduce((s,r)=>s+r.subcases.total,0)}</strong></td>
@@ -762,17 +865,17 @@ class WebNNRunner {
 
     ${results.filter(r => r.retryHistory && r.retryHistory.length > 1).length > 0 ? `
     <h3>Retry Analysis</h3>
-    <div style="background: #fff3cd; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+    <div style="background-color: #fff3cd; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
         <p><strong>${results.filter(r => r.retryHistory && r.retryHistory.length > 1).length}</strong> test(s) required retries</p>
     </div>
     <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-family: sans-serif;">
         <thead>
             <tr>
-                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Test Case</th>
-                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Initial Status</th>
-                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Final Status</th>
-                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Retry Attempts</th>
-                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Subcase Changes</th>
+                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Test Case</th>
+                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Initial Status</th>
+                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Final Status</th>
+                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Retry Attempts</th>
+                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Subcase Changes</th>
             </tr>
         </thead>
         <tbody>
@@ -801,11 +904,11 @@ class WebNNRunner {
                 </tr>
                 <tr>
                     <td colspan="5" style="padding: 0; border: 1px solid #e1e4e8;">
-                        <details style="padding: 10px; background: #f6f8fa;">
+                        <details style="padding: 10px; background-color: #f6f8fa;">
                             <summary style="cursor: pointer; font-weight: bold;">View All Attempts</summary>
                             <div style="margin-top: 10px;">
                                 ${result.retryHistory.map((attempt, idx) => `
-                                    <div style="padding: 8px; margin: 5px 0; background: white; border-left: 3px solid ${getStatusColor(attempt.status)}; border-radius: 3px;">
+                                    <div style="padding: 8px; margin: 5px 0; background-color: white; border-left: 3px solid ${getStatusColor(attempt.status)}; border-radius: 3px;">
                                         <strong>${idx === 0 ? 'Initial Run' : 'Retry Attempt ' + idx}:</strong>
                                         <span style="font-weight: bold; color: ${getStatusColor(attempt.status)};">${attempt.status}</span><br>
                                         <small>Passed: ${attempt.passed} | Failed: ${attempt.failed} | Total: ${attempt.total}</small>
@@ -823,14 +926,14 @@ class WebNNRunner {
 
     ${dllCheckResults && dllCheckResults.found ? `
     <h3>ONNX Runtime DLL Detection</h3>
-    <div style="margin: 15px 0; padding: 15px; border: 1px solid #e1e4e8; border-radius: 6px; background: #e3f2fd;">
+    <div style="margin: 15px 0; padding: 15px; border: 1px solid #e1e4e8; border-radius: 6px; background-color: #e3f2fd;">
         <h4 style="margin-top: 0;">ONNX Runtime DLLs Found (${dllCheckResults.dllCount} DLL files)</h4>
         <p><strong>Detection Time:</strong> ${new Date().toLocaleString()}</p>
-        <pre style="background: #f8f9fa; padding: 15px; border-radius: 6px; overflow-x: auto; font-family: monospace;">${dllCheckResults.dlls}</pre>
+        <pre style="background-color: #f8f9fa; padding: 15px; border-radius: 6px; overflow-x: auto; font-family: monospace;">${dllCheckResults.dlls}</pre>
     </div>
     ` : dllCheckResults && !dllCheckResults.found ? `
     <h3>ONNX Runtime DLL Detection</h3>
-    <div style="margin: 15px 0; padding: 15px; border: 1px solid #e1e4e8; border-radius: 6px; background: #fff3cd;">
+    <div style="margin: 15px 0; padding: 15px; border: 1px solid #e1e4e8; border-radius: 6px; background-color: #fff3cd;">
         <h4 style="margin-top: 0;">No ONNX Runtime DLLs Found</h4>
         <p><strong>Reason:</strong> ${dllCheckResults.reason || dllCheckResults.error || 'Unknown'}</p>
     </div>

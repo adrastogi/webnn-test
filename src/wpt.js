@@ -3,7 +3,7 @@ const { test } = require('@playwright/test');
 const { WebNNRunner } = require('./util');
 
 class WptRunner extends WebNNRunner {
-  async runWptTests(context, browser) {
+  async runWptTests(context, browser, onFirstCaseComplete) {
     // Configuration
     const wptCase = process.env.WPT_CASE;
     const specifiedJobs = process.env.JOBS;
@@ -108,6 +108,9 @@ class WptRunner extends WebNNRunner {
                          res.executionTime = ((Date.now() - start) / 1000).toFixed(2);
                          res.fileName = testFile; // Store filename for retry
                          results.push(res);
+                         if (results.length === 1 && onFirstCaseComplete) {
+                             await onFirstCaseComplete();
+                         }
                      } catch (e) {
                          const isCriticalError = e.message === 'GPUContextCreationError' ||
                                                e.message === 'HarnessError' ||

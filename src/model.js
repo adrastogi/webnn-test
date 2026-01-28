@@ -65,7 +65,7 @@ class ModelRunner extends WebNNRunner {
     };
   }
 
-  async runModelTests() {
+  async runModelTests(onFirstCaseComplete) {
     console.log('[Info] Running MODEL suite...');
 
     // Collect filter from various legacy env vars
@@ -157,6 +157,10 @@ class ModelRunner extends WebNNRunner {
         if (lastRes.testName === modelDef.name && !lastRes.executionTime) {
             lastRes.executionTime = ((Date.now() - startTime) / 1000).toFixed(2);
         }
+      }
+
+      if (results.length === 1 && onFirstCaseComplete) {
+          await onFirstCaseComplete();
       }
 
       // Pause between tests

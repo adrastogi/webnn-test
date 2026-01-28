@@ -1,11 +1,28 @@
-{
-    [
-        "name": "ORT CPU WPT",
-        "args": [
-            "--enable-features=WebNNOnnxRuntime"
-        ],
+[
+    {
+        "name": "ORT WPT",
+        "extra-browser-arg": "--enable-features=WebNNOnnxRuntime",
         "suite": "wpt",
-        "wpt-case": "add,abs",
-        "device": "cpu"
-    ]
-}
+        "wpt-case": "add",
+        "device": "cpu,gpu,npu"
+    },
+    {
+        "name": "ORT model lenet",
+        "extra-browser-arg": "--enable-features=WebNNOnnxRuntime",
+        "suite": "model",
+        "model-case": "lenet",
+        "device": "cpu,gpu,npu"
+    },
+    {
+        "name": "ORT wpt",
+        "extra-browser-arg": "--enable-features=WebNNOnnxRuntime",
+        "suite": "wpt",
+        "device": "cpu,gpu,npu"
+    },
+    {
+        "name": "ORT model",
+        "extra-browser-arg": "--enable-features=WebNNOnnxRuntime",
+        "suite": "model",
+        "device": "cpu,gpu,npu"
+    }
+]

@@ -10,11 +10,17 @@ const { WptRunner } = require('./wpt');
 const { ModelRunner } = require('./model');
 const { launchBrowser } = require('./util');
 
+// Helper to parse comma-separated lists
+const parseList = (str) => (str || '').split(',').map(s => s.trim()).filter(s => s.length > 0);
+
 if (require.main === module && process.env.IS_PLAYWRIGHT_CHILD_PROCESS !== 'true') {
-  // Parse command line arguments
+  // ===========================================================================
+  // CLI / Parent Process Logic
+  // ===========================================================================
+
   const args = process.argv.slice(2);
 
-  // Check for help argument
+  // Help Check
   if (args.includes('--help') || args.includes('-h')) {
     console.log(`
 WebNN Automation Tests
@@ -22,636 +28,397 @@ WebNN Automation Tests
 Usage: node src/main.js [options]
 
 Options:
+  --config <file>          Path to JSON configuration file
   --suite <name>           Test suite to run (default: wpt). Values: wpt, model
   --list                   List all test cases in the specified suite
   --jobs <number>          Number of parallel jobs (default: 4)
   --repeat <number>        Number of times to repeat the test run (default: 1)
   --device <type>          Device type to use (default: cpu). Values: cpu, gpu, npu
   --chrome-channel <name>  Chrome channel to use (default: canary). Values: stable, canary, dev, beta
-  --extra-browser-args <args> Extra arguments for browser launch (e.g. "--use-gl=angle --use-angle=gl")
-  --email [address]        Send email report to address (default: ygu@microsoft.com if no address provided)
-  --pause <case>           Pause execution on failure for specified case prefix
+  --extra-browser-arg <args> Extra arguments for browser launch
+  --email [address]        Send email report
+  --pause <case>           Pause execution on failure
+  --browser-path <path>    Custom path to browser executable
 
 Test Selection:
-  --wpt-case <filter>      Run specific WPT test cases (comma-separated prefix)
-  --wpt-range <range>      Run tests by index range (e.g., 0,1,3-7)
-  --model-case <filter>    Run specific Model cases (e.g., lenet, sdxl)
+  --wpt-case <filter>      Run specific WPT test cases
+  --wpt-range <range>      Run tests by index range
+  --model-case <filter>    Run specific Model cases
 
 Examples:
+  node src/main.js --config config.json
   node src/main.js --suite wpt --wpt-case abs
-  node src/main.js --suite wpt --wpt-range 0-5
-  node src/main.js --suite wpt --jobs 2 --repeat 3
 `);
     process.exit(0);
   }
 
-  // Check for list argument
+  // List Mode Handling
   if (args.includes('--list')) {
     process.env.LIST_MODE = 'true';
   } else {
     process.env.LIST_MODE = 'false';
   }
 
-  let testSuite = 'wpt'; // default
-  let testCase = null;
-  let jobs = 4; // default: run parallel with 4 jobs
-  let repeat = 1; // default: run once
-  let device = 'cpu'; // default: cpu
+  // --- Argument Parsing ---
 
-  // Find --suite argument
-  const suiteIndex = args.findIndex(arg => arg === '--suite');
-  if (suiteIndex !== -1 && suiteIndex + 1 < args.length) {
-    testSuite = args[suiteIndex + 1];
-  }
+  // Common Args
+  const getArg = (name) => {
+    const idx = args.findIndex(a => a === name);
+    return (idx !== -1 && idx + 1 < args.length) ? args[idx + 1] : null;
+  };
+  const getArgValue = (prefix) => {
+    const arg = args.find(a => a.startsWith(prefix));
+    return arg ? arg.split('=')[1] : null;
+  };
 
-  // Find --device argument
-  const deviceIndex = args.findIndex(arg => arg === '--device');
-  const deviceEqArg = args.find(arg => arg.startsWith('--device='));
+  const jobsStr = getArg('--jobs') || '4';
+  const jobs = parseInt(jobsStr, 10);
+  const repeatStr = getArg('--repeat') || '1';
+  const repeat = parseInt(repeatStr, 10);
 
-  if (deviceIndex !== -1 && deviceIndex + 1 < args.length) {
-    device = args[deviceIndex + 1].toLowerCase();
-  } else if (deviceEqArg) {
-    device = deviceEqArg.split('=')[1].toLowerCase();
-  }
-
-  const devices = device.split(',').map(d => d.trim().toLowerCase());
-  const validDevices = ['cpu', 'gpu', 'npu'];
-  const invalidDevices = devices.filter(d => !validDevices.includes(d));
-
-  if (invalidDevices.length > 0) {
-    console.error(`Invalid --device value(s): ${invalidDevices.join(', ')}. Must be one of: cpu, gpu, npu`);
-    process.exit(1);
-  }
-
-  // Find --jobs argument
-  const jobsIndex = args.findIndex(arg => arg === '--jobs');
-  if (jobsIndex !== -1 && jobsIndex + 1 < args.length) {
-    jobs = parseInt(args[jobsIndex + 1], 10);
-    if (isNaN(jobs) || jobs < 1) {
-      console.error('Invalid --jobs value. Must be a positive integer.');
-      process.exit(1);
-    }
-  }
-
-  // Find --repeat argument
-  const repeatIndex = args.findIndex(arg => arg === '--repeat');
-  if (repeatIndex !== -1 && repeatIndex + 1 < args.length) {
-    repeat = parseInt(args[repeatIndex + 1], 10);
-    if (isNaN(repeat) || repeat < 1) {
-      console.error('Invalid --repeat value. Must be a positive integer.');
-      process.exit(1);
-    }
-  }
-
-  // Find suite-specific case arguments
-  const wptCaseIndex = args.findIndex(arg => arg === '--wpt-case');
-  const modelCaseIndex = args.findIndex(arg => arg === '--model-case');
-
-  if (wptCaseIndex !== -1 && wptCaseIndex + 1 < args.length) {
-    testCase = args[wptCaseIndex + 1];
-  }
-  if (modelCaseIndex !== -1 && modelCaseIndex + 1 < args.length) {
-    testCase = args[modelCaseIndex + 1];
-  }
-
-  // Find --wpt-range argument
-  const wptRangeIndex = args.findIndex(arg => arg === '--wpt-range');
-  let wptRange = null;
-  if (wptRangeIndex !== -1 && wptRangeIndex + 1 < args.length) {
-    wptRange = args[wptRangeIndex + 1];
-  }
-
-  // Find --pause argument
-  const pauseIndex = args.findIndex(arg => arg === '--pause');
-  let pauseCase = null;
-  if (pauseIndex !== -1 && pauseIndex + 1 < args.length) {
-    pauseCase = args[pauseIndex + 1];
-  }
-
-  // Find --email argument
-  const emailIndex = args.findIndex(arg => arg === '--email');
   let emailAddress = null;
-  if (emailIndex !== -1) {
-    // Check if next arg exists and is not another flag (does not start with --)
-    if (emailIndex + 1 < args.length && !args[emailIndex + 1].startsWith('--')) {
-      emailAddress = args[emailIndex + 1];
-    } else {
-      // --email flag without address, use default
-      emailAddress = 'ygu@microsoft.com';
-    }
+  const emailIdx = args.findIndex(a => a === '--email');
+  if (emailIdx !== -1) {
+      if (emailIdx + 1 < args.length && !args[emailIdx + 1].startsWith('--')) {
+          emailAddress = args[emailIdx + 1];
+      } else {
+          emailAddress = 'ygu@microsoft.com';
+      }
   }
 
-  // Find --chrome-channel argument
-  const chromeChannelIndex = args.findIndex(arg => arg === '--chrome-channel');
-  let chromeChannel = 'canary'; // default
-  if (chromeChannelIndex !== -1 && chromeChannelIndex + 1 < args.length) {
-    chromeChannel = args[chromeChannelIndex + 1].toLowerCase();
-    const validChannels = ['canary', 'dev', 'beta', 'stable'];
-    if (!validChannels.includes(chromeChannel)) {
+  const chromeChannel = (getArg('--chrome-channel') || 'canary').toLowerCase();
+  const validChannels = ['canary', 'dev', 'beta', 'stable'];
+  if (!validChannels.includes(chromeChannel)) {
       console.error(`Invalid --chrome-channel value: ${chromeChannel}`);
       console.error(`Valid channels are: ${validChannels.join(', ')}`);
       process.exit(1);
-    }
   }
 
-  // Find --extra-browser-args argument
-  const extraArgsIndex = args.findIndex(arg => arg === '--extra-browser-args');
-  let extraBrowserArgs = null;
-  if (extraArgsIndex !== -1 && extraArgsIndex + 1 < args.length) {
-    extraBrowserArgs = args[extraArgsIndex + 1];
-  }
+  let playwrightChannel = (chromeChannel === 'stable') ? 'chrome' : `chrome-${chromeChannel}`;
 
-  // Find --browser-path argument
-  const browserPathIndex = args.findIndex(arg => arg === '--browser-path');
-  let browserPath = null;
-  if (browserPathIndex !== -1 && browserPathIndex + 1 < args.length) {
-    browserPath = args[browserPathIndex + 1];
-  }
+  const globalExtraArgs = getArg('--extra-browser-arg');
+  const browserPath = getArg('--browser-path');
+  const configFile = getArg('--config');
+  const pauseCase = getArg('--pause');
+  const wptRange = getArg('--wpt-range');
 
-  // Map 'stable' to 'chrome' for Playwright (Playwright uses 'chrome' not 'stable')
-  let playwrightChannel;
-  if (chromeChannel === 'stable') {
-      playwrightChannel = 'chrome';
+  // --- Config Generation ---
+  let runConfigs = [];
+
+  if (configFile) {
+      const configPath = path.isAbsolute(configFile) ? configFile : path.resolve(process.cwd(), configFile);
+      if (!fs.existsSync(configPath)) {
+          console.error(`Config file not found: ${configPath}`);
+          process.exit(1);
+      }
+      try {
+          const rawConfigs = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+          // Normalize configs and expand devices
+          runConfigs = rawConfigs.flatMap((item, idx) => {
+               const devices = (item.device || 'cpu').split(',').map(d => d.trim()).filter(Boolean);
+               return devices.map(device => ({
+                  name: item.name || `Config_${idx+1}`,
+                  suite: item.suite || 'wpt',
+                  device: device,
+                  browserArgs: item['extra-browser-arg'] ? `${globalExtraArgs || ''} ${item['extra-browser-arg']}`.trim() : globalExtraArgs,
+                  wptCase: item['wpt-case'] || null,
+                  modelCase: item['model-case'] || null,
+                  wptRange: null,
+                  pauseCase: null
+               }));
+          });
+      } catch (e) {
+          console.error(`Error reading config file: ${e.message}`);
+          process.exit(1);
+      }
   } else {
-      playwrightChannel = `chrome-${chromeChannel}`;
+      // CLI Mode -> Generate Cartesian Product
+      let suites = parseList(getArg('--suite') || 'wpt');
+      let deviceArg = getArg('--device');
+      if (!deviceArg) {
+          const dVal = getArgValue('--device=');
+          deviceArg = dVal || 'cpu';
+      }
+      let devices = parseList(deviceArg);
+
+      const wptCase = getArg('--wpt-case') || getArg('--model-case');
+      const modelCase = getArg('--model-case') || getArg('--wpt-case');
+
+      // Expand "all" suite
+      if (suites.includes('all')) suites = ['wpt', 'model'];
+
+      // Generate configs
+      // Order: Device outer, Suite inner
+      for (const d of devices) {
+          for (const s of suites) {
+              runConfigs.push({
+                  name: `${s}_${d}`,
+                  suite: s,
+                  device: d,
+                  browserArgs: globalExtraArgs,
+                  wptCase: (s === 'wpt') ? (getArg('--wpt-case') || wptCase) : null,
+                  modelCase: (s === 'model') ? (getArg('--model-case') || modelCase) : null,
+                  wptRange: wptRange,
+                  pauseCase: pauseCase
+              });
+          }
+      }
   }
 
-  // Validate test suite
-  let validSuites = ['wpt', 'model'];
-  let suiteList = testSuite.split(',').map(s => s.trim()).filter(s => s.length > 0);
-
-  // Handle 'all' keyword - expand to all supported suites
-  if (suiteList.includes('all')) {
-      suiteList = ['wpt', 'model'];
-      testSuite = suiteList.join(',');
-  }
-
-  const invalidSuites = suiteList.filter(s => !validSuites.includes(s));
-  if (invalidSuites.length > 0) {
-    console.error(`Invalid test suite(s): ${invalidSuites.join(', ')}`);
-    console.error(`Valid suites are: ${validSuites.join(', ')}`);
-    process.exit(1);
-  }
-
-  console.log(`Running WebNN tests for suite(s): ${testSuite}`);
-  console.log(`[Channel] Chrome channel: ${chromeChannel}`);
-  if (wptRange) {
-    console.log(`[Range] Range filter: Running test cases ${wptRange}`);
-  }
-  if (pauseCase) {
-    console.log(`[Pause] Pause enabled for case(s): ${pauseCase}`);
-  }
-  if (emailAddress) {
-    console.log(`[Email] Email reports will be sent to: ${emailAddress}`);
-  }
-  if (jobs > 1) {
-
-  if (browserPath) {
-    console.log(`[Browser] Custom browser path: ${browserPath}`);
-  } console.log(`Parallel execution enabled: ${jobs} job(s)`);
-  }
-  if (repeat > 1) {
-    console.log(`[Repeat] Repeat mode enabled: Tests will run ${repeat} time(s)`);
-  }
-  if (extraBrowserArgs) {
-    console.log(`[Browser] Extra launch arguments: ${extraBrowserArgs}`);
-  }
-
-  console.log(`[Device] Device type: ${device}`);
-
-  // Set environment variables for the test
-  process.env.TEST_SUITE = testSuite;
-  process.env.DEVICE = device;
-
-
-  // Set suite-specific case environment variables
-  if (wptCaseIndex !== -1 && wptCaseIndex + 1 < args.length) {
-    process.env.WPT_CASE = args[wptCaseIndex + 1];
-  }
-  if (modelCaseIndex !== -1 && modelCaseIndex + 1 < args.length) {
-    process.env.MODEL_CASE = args[modelCaseIndex + 1];
-  }
-  if (browserPath) {
-    process.env.BROWSER_PATH = browserPath;
-  }
-
-  // Keep legacy TEST_CASE for backward compatibility
-  if (testCase) {
-    process.env.TEST_CASE = testCase;
-  }
+  // --- Environment Setup ---
   process.env.JOBS = jobs.toString();
   process.env.CHROME_CHANNEL = playwrightChannel;
-  if (extraBrowserArgs) {
-    process.env.EXTRA_BROWSER_ARGS = extraBrowserArgs;
-  }
-
-  // Pass --wpt-range and --pause as environment variables
-  if (wptRange) {
-    process.env.WPT_RANGE = wptRange;
-  }
-  if (pauseCase) {
-    process.env.PAUSE_CASE = pauseCase;
-  }
+  process.env.TEST_CONFIG_LIST = JSON.stringify(runConfigs);
+  process.env.IS_LIST_MODE = process.env.LIST_MODE;
   if (emailAddress) {
-    process.env.EMAIL_ADDRESS = emailAddress;
-    process.env.EMAIL_TO = emailAddress; // Ensure EMAIL_TO is also set for compatibility
+      process.env.EMAIL_ADDRESS = emailAddress;
+      process.env.EMAIL_TO = emailAddress;
   }
+  if (browserPath) process.env.BROWSER_PATH = browserPath;
 
-  // Handle list mode
-  if (process.env.LIST_MODE === 'true') {
-     console.log(`[Info] Listing tests for suite(s): ${testSuite}`);
+  delete process.env.TEST_SUITE;
+  delete process.env.DEVICE;
+  delete process.env.WPT_CASE;
+  delete process.env.MODEL_CASE;
+  delete process.env.EXTRA_BROWSER_ARGS;
 
-     // Set minimal Playwright config for listing
-     const config = {
-       use: {
-         channel: playwrightChannel,
-         headless: true
-       }
-     };
+  // --- Execution & Iteration Loop ---
 
-     (async () => {
-         try {
-             // We need to launch browser to discover tests in some suites (like WPT)
-             const browser = await chromium.launch({ channel: playwrightChannel, headless: true });
-             const context = await browser.newContext();
-             const page = await context.newPage();
+  const runIteration = (iteration, totalIterations) => {
+      return new Promise((resolve, reject) => {
+          const iterationPrefix = totalIterations > 1 ? `[Iteration ${iteration}/${totalIterations}] ` : '';
 
-             const suites = testSuite.split(',').map(s => s.trim());
-             for (const suite of suites) {
-                 console.log(`\n=== Suite: ${suite.toUpperCase()} ===`);
-
-                 if (suite === 'wpt') {
-                     const runner = new WptRunner(page);
-                     // WptRunner.runWptTests discovers tests but also runs them.
-                     // We need a way to just discover.
-                     // Since we don't have separate discovery method yet, we'll need to modify WptRunner
-                     // For now, let's assume we can access internal discovery logic or create a helper
-                     // But WPT discovery is site scraping
-                     console.log('Discovering WPT tests from https://wpt.live/webnn/conformance_tests/ ...');
-                     await page.goto('https://wpt.live/webnn/conformance_tests/');
-                     await page.waitForSelector('.file');
-                     const files = await page.$$eval('.file a', links =>
-                         links.map(l => l.textContent.trim()).filter(t => t.endsWith('.js'))
-                     );
-
-                     files.forEach((f, i) => console.log(`[${i}] ${f}`));
-                     console.log(`Total: ${files.length} tests`);
-                 }
-                 else if (suite === 'model') {
-                     const runner = new ModelRunner(page);
-                     console.log(`Listing ${suite.toUpperCase()} tests (Static List):`);
-                     Object.keys(runner.models).forEach((k, i) => {
-                         const m = runner.models[k];
-                         console.log(`[${i}] ${k}: ${m.name} (${m.type})`);
-                     });
-                 }
-                 else {
-                    console.log(`[Warning] Listing not supported for suite: ${suite}`);
-                 }
-             }
-
-             await browser.close();
-             process.exit(0);
-         } catch (e) {
-             console.error(`Error listing tests: ${e.message}`);
-             process.exit(1);
-         }
-     })();
-  }
-
-  // Function to run a single test iteration
-  function runTestIteration(iteration, totalIterations) {
-    return new Promise((resolve, reject) => {
-      const iterationPrefix = totalIterations > 1 ? `[Iteration ${iteration}/${totalIterations}] ` : '';
-
-      if (totalIterations > 1) {
-        console.log(`\n${'='.repeat(80)}`);
-        console.log(`[Iteration] ITERATION ${iteration}/${totalIterations}`);
-        console.log(`${'='.repeat(80)}\n`);
-      }
-
-      // Set iteration number in environment for the test to use
-      process.env.TEST_ITERATION = iteration.toString();
-      process.env.TEST_TOTAL_ITERATIONS = totalIterations.toString();
-
-      // Run Playwright test without config
-      // const configPath = path.join(__dirname, '..', 'playwright.config.js');
-
-      // Filter out our custom options that we've already processed
-      const customOptions = [
-        '--suite', testSuite,
-        '--wpt-case', testCase,
-        '--model-case', testCase,
-        '--wpt-range', wptRange,
-        '--pause', pauseCase,
-        '--email', emailAddress,
-        '--chrome-channel', chromeChannel,
-        '--extra-browser-args', extraBrowserArgs,
-        '--browser-path', browserPath,
-        '--jobs', jobs.toString(),
-        '--repeat', repeat.toString(),
-        '--device', device
-      ];
-
-      const filteredArgs = args.filter(arg => {
-        // Handle --device=value style
-        if (arg.startsWith('--device=')) return false;
-
-        // Check if this arg is in our custom options list
-        const argIndex = customOptions.indexOf(arg);
-        if (argIndex !== -1) return false;
-
-        // Also check if previous arg was an option expecting a value
-        const argPosition = args.indexOf(arg);
-        if (argPosition > 0) {
-          const prevArg = args[argPosition - 1];
-          if (prevArg === '--suite' ||
-              prevArg === '--wpt-case' ||
-              prevArg === '--model-case' ||
-              prevArg === '--wpt-range' ||
-              prevArg === '--pause' ||
-              prevArg === '--chrome-channel' ||
-              prevArg === '--extra-browser-args' ||
-              prevArg === '--jobs' ||
-              prevArg === '--browser-path' ||
-              prevArg === '--repeat' ||
-              prevArg === '--device') {
-            return false; // This is a value for a custom option, skip it
-          }
-          // Special case for --email: only skip next arg if it's not a flag
-          if (prevArg === '--email') {
-            if (!arg.startsWith('--')) {
-              return false; // This is an email address, skip it
-            }
-            // Otherwise it's the next flag, keep it
-          }
-        }
-
-        return true;
-      });
-
-      const playwrightArgs = [
-        'test',
-        '-c', path.join(__dirname, '..', 'runner.config.js'),
-        'src/main.js',
-        '--reporter=line,html',
-        '--timeout=600000'
-      ];
-
-      if (process.env.CI) {
-        playwrightArgs.push('--retries=2');
-      }
-
-      // Only add filtered args if there are any
-      // Don't add them if they're empty to avoid confusing Playwright
-      if (filteredArgs.length > 0) {
-        playwrightArgs.push(...filteredArgs);
-      }
-
-      const playwrightCli = path.join(__dirname, '..', 'node_modules', '@playwright', 'test', 'cli.js');
-      const playwrightProcess = spawn(process.execPath, [playwrightCli, ...playwrightArgs], {
-        stdio: 'inherit',
-        shell: false,
-        env: { ...process.env, IS_PLAYWRIGHT_CHILD_PROCESS: 'true' },
-      });
-
-      playwrightProcess.on('close', (code) => {
-        if (code === 0) {
-          console.log(`\n[Success] ${iterationPrefix}Test iteration completed successfully`);
-
-          // Find the HTML report file (in temp directory)playwright-report
-          const reportTempDir = path.join(__dirname, '..', 'report-temp');
-          const reportDir = path.join(__dirname, '..', 'report');
-          const tempIndexFile = path.join(reportTempDir, 'index.html');
-
-          // Ensure report directory exists
-          if (!fs.existsSync(reportDir)) {
-            fs.mkdirSync(reportDir, { recursive: true });
+          if (totalIterations > 1) {
+            console.log(`\n${'='.repeat(80)}`);
+            console.log(`[Iteration] ITERATION ${iteration}/${totalIterations}`);
+            console.log(`${'='.repeat(80)}\n`);
           }
 
-          if (fs.existsSync(tempIndexFile)) {
-            // Generate timestamped filename YYYYMMDDHHMMSS with iteration suffix
-            const now = new Date();
-            const timestamp = now.getFullYear().toString() +
+          process.env.TEST_ITERATION = iteration.toString();
+          process.env.TEST_TOTAL_ITERATIONS = totalIterations.toString();
+
+          const playwrightArgs = [
+            'test',
+            '-c', path.join(__dirname, '..', 'runner.config.js'),
+            'src/main.js',
+            '--reporter=line,html',
+            '--timeout=0'
+          ];
+          if (process.env.CI) playwrightArgs.push('--retries=2');
+
+          const playwrightCli = path.join(__dirname, '..', 'node_modules', '@playwright', 'test', 'cli.js');
+
+          const childProcess = spawn(process.execPath, [playwrightCli, ...playwrightArgs], {
+             stdio: 'inherit',
+             shell: false,
+             env: { ...process.env, IS_PLAYWRIGHT_CHILD_PROCESS: 'true' }
+          });
+
+          childProcess.on('close', (code) => {
+              // Report Copy Logic
+              if (code === 0) {
+                  const reportTempDir = path.join(__dirname, '..', 'report-temp');
+                  const reportDir = path.join(__dirname, '..', 'report');
+                  try {
+                      if (fs.existsSync(reportTempDir)) {
+                          if (!fs.existsSync(reportDir)) fs.mkdirSync(reportDir, {recursive: true});
+
+                           const copyDir = (src, dest) => {
+                                if (!fs.existsSync(dest)) fs.mkdirSync(dest, {recursive: true});
+                                fs.readdirSync(src, {withFileTypes: true}).forEach(ent => {
+                                    const s = path.join(src, ent.name), d = path.join(dest, ent.name);
+                                    if (ent.isDirectory()) copyDir(s, d);
+                                    else fs.copyFileSync(s, d);
+                                });
+                           };
+                           copyDir(reportTempDir, reportDir);
+
+                           const now = new Date();
+                           const timestamp = now.getFullYear().toString() +
                              (now.getMonth() + 1).toString().padStart(2, '0') +
                              now.getDate().toString().padStart(2, '0') +
                              now.getHours().toString().padStart(2, '0') +
                              now.getMinutes().toString().padStart(2, '0') +
                              now.getSeconds().toString().padStart(2, '0');
-
-            const iterationSuffix = totalIterations > 1 ? `_iter${iteration}` : '';
-            const indexFile = path.join(reportDir, 'index.html');
-            const timestampedFile = path.join(reportDir, `${timestamp}${iterationSuffix}.html`);
-
-            // Copy temp report to timestamped file
-            try {
-              // Copy entire temp directory to report directory
-              try {
-                // Simplified recursive copy implementation
-                const copyDir = (src, dest) => {
-                     if (!fs.existsSync(dest)) fs.mkdirSync(dest, {recursive: true});
-                     fs.readdirSync(src, {withFileTypes: true}).forEach(ent => {
-                         const s = path.join(src, ent.name), d = path.join(dest, ent.name);
-                         if (ent.isDirectory()) copyDir(s, d);
-                         else fs.copyFileSync(s, d);
-                     });
-                };
-                copyDir(reportTempDir, reportDir);
-              } catch(e) {}
-
-              console.log(`[Success] ${iterationPrefix}HTML report generated`);
-
-              if (fs.existsSync(indexFile)) {
-                  fs.renameSync(indexFile, timestampedFile);
-                  console.log(`[Report] ${iterationPrefix}Timestamped report: ${timestampedFile}`);
-              } else if (fs.existsSync(path.join(reportDir, 'index.html'))) {
-                  fs.renameSync(path.join(reportDir, 'index.html'), timestampedFile);
+                           const suffix = totalIterations > 1 ? `_iter${iteration}` : '';
+                           const newName = path.join(reportDir, `${timestamp}${suffix}.html`);
+                           if (fs.existsSync(path.join(reportDir, 'index.html'))) {
+                               fs.renameSync(path.join(reportDir, 'index.html'), newName);
+                               console.log(`[Report] Generated: ${newName}`);
+                           }
+                      }
+                  } catch (e) {
+                      console.error('Error handling report:', e);
+                  }
+                  resolve(0);
+              } else {
+                  console.log(`\n[Fail] ${iterationPrefix}Test iteration failed with code ${code}`);
+                  reject(code);
               }
-
-              // Embed WebNN report logic omitted for brevity as it was complex regex,
-              // but the essential file copy is preserved.
-
-            } catch (error) {
-              console.log(`[Warning]  ${iterationPrefix}Error copying report files: ${error.message}`);
-            }
-          } else {
-            console.log(`[Warning]  ${iterationPrefix}Report file not found: ${tempIndexFile}`);
-          }
-          resolve(code);
-        } else {
-          console.log(`\n[Fail] ${iterationPrefix}Test iteration failed with code ${code}`);
-          reject(code);
-        }
+          });
       });
-    });
-  }
+  };
 
-  // Main execution: run tests with repeat support
-  if (process.env.LIST_MODE !== 'true') {
   (async () => {
-    try {
-      const allResults = [];
-      for (let i = 1; i <= repeat; i++) {
-        const code = await runTestIteration(i, repeat);
-        allResults.push({ iteration: i, exitCode: code });
-        if (i < repeat) await new Promise(resolve => setTimeout(resolve, 2000));
-      }
-      const allPassed = allResults.every(r => r.exitCode === 0);
-      process.exit(allPassed ? 0 : 1);
-    } catch (error) {
-      console.error(`[Error] Error during test execution: ${error}`);
-      process.exit(typeof error === 'number' ? error : 1);
+    if (process.env.LIST_MODE === 'true') {
+         // Run Playwright with specific env to triggering Listing
+         await runIteration(1, 1);
+    } else {
+         const results = [];
+         for (let i = 1; i <= repeat; i++) {
+             try {
+                 await runIteration(i, repeat);
+                 results.push(0);
+             } catch (c) {
+                 results.push(c);
+             }
+             if (i < repeat) await new Promise(r => setTimeout(r, 2000));
+         }
+         process.exit(results.every(r => r === 0) ? 0 : 1);
     }
   })();
-  // console.log("Debug: Entering test definition block. require.main === module is", require.main === module);
-  }
+
 } else {
+  // ===========================================================================
+  // Child Process / Playwright Test Logic
+  // ===========================================================================
 
-// -------------------------------------------------------------
-// Playwright Test Definition
-// -------------------------------------------------------------
+  test.describe('WebNN Tests', () => {
+      let browser, context, page;
+      const launchInstance = async () => launchBrowser();
 
-// Increase default timeout for all tests
-// test.setTimeout(3600000); // 1 hour global timeout moved to config
+      test.afterAll(async () => {
+          if (browser) await browser.close();
+      });
 
-test.describe('WebNN Tests', () => {
-    let browser;
-    let context;
-    let page;
+      if (process.env.IS_LIST_MODE === 'true') {
+          // Listing Logic
+          test('List Tests', async () => {
+               const configs = JSON.parse(process.env.TEST_CONFIG_LIST || '[]');
+               // Collect unique suites
+               const uniqueSuites = [...new Set(configs.map(c => c.suite))];
 
-    const launchBrowserInstance = async() => {
-        return await launchBrowser();
-    };
+               // Launch minimal browser for discovery
+               const instance = await launchInstance();
+               page = instance.page;
+               browser = instance.browser || instance.context;
 
-    test.beforeAll(async () => {
-        // Browser launch deferred to test logic to handle device loops
-    });
+               for (const suite of uniqueSuites) {
+                    console.log(`\n=== Suite: ${suite.toUpperCase()} ===`);
+                    if (suite === 'wpt') {
+                        console.log('Discovering WPT tests from https://wpt.live/webnn/conformance_tests/ ...');
+                        await page.goto('https://wpt.live/webnn/conformance_tests/');
+                        try {
+                            await page.waitForSelector('.file', {timeout: 10000});
+                            const files = await page.$$eval('.file a', links =>
+                                links.map(l => l.textContent.trim()).filter(t => t.endsWith('.js'))
+                            );
+                            files.forEach((f, i) => console.log(`[${i}] ${f}`));
+                        } catch(e) { console.log('Could not load WPT file list'); }
+                    } else if (suite === 'model') {
+                        const runner = new ModelRunner(page);
+                        Object.keys(runner.models).forEach((k, i) => {
+                             const m = runner.models[k];
+                             console.log(`[${i}] ${k}: ${m.name} (${m.type})`);
+                        });
+                    }
+               }
+          });
+      } else {
+          test('Run Configured Tests', async () => {
+              const configs = JSON.parse(process.env.TEST_CONFIG_LIST || '[]');
+              let results = [];
+              let runner = null;
+              const startTime = Date.now();
+              let dllResults = null;
 
-    test.afterAll(async () => {
-        if (browser) await browser.close();
-    });
+              for (const [idx, config] of configs.entries()) {
+                   console.log(`\n=== Running Config: ${config.name} (Suite: ${config.suite}, Device: ${config.device}) ===`);
 
-    test('Run WebNN Test Suite', async () => {
-        const rawSuiteEnv = process.env.TEST_SUITE || 'wpt';
-        const suites = rawSuiteEnv.split(',').map(s => s.trim()).filter(s => s.length > 0);
+                   process.env.EXTRA_BROWSER_ARGS = config.browserArgs || '';
+                   process.env.DEVICE = config.device;
 
-        let results = [];
-        let runner = null; // We need at least one runner instance for reporting methods
+                   // Always relaunch for isolation between configs
+                   if (browser) {
+                       await browser.close();
+                       browser = null;
+                       await new Promise(r => setTimeout(r, 1000));
+                   }
 
-        const startTime = Date.now();
-        console.log(`Starting execution for suites: ${suites.join(', ')}`);
+                   const instance = await launchInstance();
+                   browser = instance.browser || instance.context;
+                   context = instance.context;
+                   page = instance.page;
 
-        // Common setup: Launcher for restarts
-        const launcher = async () => {
-             return await launchBrowserInstance();
-        };
+                   let currentRunner;
+                   if (config.suite === 'wpt') {
+                       currentRunner = new WptRunner(page);
+                       currentRunner.launchNewBrowser = launchInstance;
+                   } else {
+                       currentRunner = new ModelRunner(page);
+                       currentRunner.launchNewBrowser = launchInstance;
+                   }
+                   runner = currentRunner;
 
-        let dllResults = null;
+                   if (idx === 0) {
+                        const processName = (process.env.CHROME_CHANNEL || '').includes('edge') ? 'msedge.exe' : 'chrome.exe';
+                        // Short delay to ensure process is stable
+                        // await new Promise(r => setTimeout(r, 2000));
+                        // dllResults = await currentRunner.checkOnnxruntimeDlls(processName);
+                   }
 
-        const rawDeviceEnv = process.env.DEVICE || 'cpu';
-        const devices = rawDeviceEnv.split(',').map(d => d.trim()).filter(d => d.length > 0);
+                   process.env.WPT_CASE = config.wptCase || '';
+                   process.env.MODEL_CASE = config.modelCase || '';
+                   process.env.WPT_RANGE = config.wptRange || '';
+                   process.env.PAUSE_CASE = config.pauseCase || '';
 
-        for (const [deviceIndex, deviceItem] of devices.entries()) {
-            process.env.DEVICE = deviceItem;
-            console.log(`\n=== Running for Device: ${deviceItem.toUpperCase()} ===`);
+                   // Callback to run DLL check after first case execution
+                   const onFirstCaseComplete = async () => {
+                       if (idx === 0 && !dllResults) {
+                           const processName = (process.env.CHROME_CHANNEL || '').includes('edge') ? 'msedge.exe' : 'chrome.exe';
+                           console.log('[Info] First case completed. Checking DLLs...');
+                           dllResults = await currentRunner.checkOnnxruntimeDlls(processName);
+                       }
+                   };
 
-            for (const [suiteIndex, suite] of suites.entries()) {
-                console.log(`\n=== Running Suite: ${suite.toUpperCase()} (Device: ${deviceItem}) ===`);
+                   let runRes = [];
+                   if (config.suite === 'wpt') {
+                       runRes = await currentRunner.runWptTests(context, browser, onFirstCaseComplete);
+                   } else {
+                       runRes = await currentRunner.runModelTests(onFirstCaseComplete);
+                   }
 
-                // Relaunch or Initial Launch
-                const isFirstRun = deviceIndex === 0 && suiteIndex === 0;
+                   // Ensure check ran if for some reason callback wasn't triggered (e.g. 0 tests)
+                   if (idx === 0 && !dllResults) await onFirstCaseComplete();
 
-                if (!isFirstRun) {
-                     console.log('[Info] Relaunching browser...');
-                     try {
-                         if (context) await context.close();
-                         if (browser && browser !== context) await browser.close();
-                     } catch(e) {
-                         console.log(`Warning closing previous browser: ${e.message}`);
-                     }
-                     // Give it a moment to release file locks
-                     await new Promise(r => setTimeout(r, 2000));
-                }
 
-                if (!isFirstRun || !browser) {
-                     const instance = await launchBrowserInstance();
-                     browser = instance.browser || instance.context;
-                     context = instance.context;
-                     page = instance.page;
-                }
+                   runRes.forEach(r => {
+                       r.testName = `[${config.name}] ${r.testName}`;
+                       r.configName = config.name;
+                       r.device = config.device;
+                       r.fullConfig = config;
+                   });
+                   results = results.concat(runRes);
+              }
 
-                let currentRunner;
-                let suiteResults = [];
+              if (results.length > 0 && runner) {
+                   const wallTime = ((Date.now() - startTime) / 1000).toFixed(2);
+                   const sumOfTestTimes = results.reduce((acc, r) => acc + (parseFloat(r.executionTime)||0), 0).toFixed(2);
+                   const subtitle = configs.map(c => c.name).join(', ');
+                   const suiteNames = [...new Set(configs.map(c => c.suite))];
 
-                if (suite === 'wpt') {
-                    currentRunner = new WptRunner(page);
-                    currentRunner.launchNewBrowser = launcher;
-                } else if (suite === 'model') {
-                    currentRunner = new ModelRunner(page);
-                    currentRunner.launchNewBrowser = launcher;
-                } else {
-                    console.error(`Unknown suite: ${suite}`);
-                    continue;
-                }
+                   const report = runner.generateHtmlReport(suiteNames, subtitle, results, dllResults, wallTime, sumOfTestTimes);
 
-                // Execute suite and (optionally) DLL check in parallel
-                let checkPromise = Promise.resolve(null);
-                if (isFirstRun) {
-                     const processName = (process.env.CHROME_CHANNEL || '').includes('edge') ? 'msedge.exe' : 'chrome.exe';
-                     // Delay checks slightly to let browser/tests warm up
-                     checkPromise = new Promise(resolve => setTimeout(resolve, 5000))
-                        .then(() => currentRunner.checkOnnxruntimeDlls(processName));
-                }
+                   const reportDir = path.join(__dirname, '..', 'report-temp');
+                   if (!fs.existsSync(reportDir)) fs.mkdirSync(reportDir, {recursive:true});
+                   fs.writeFileSync(path.join(reportDir, 'index.html'), report);
 
-                if (suite === 'wpt') {
-                     suiteResults = await currentRunner.runWptTests(context, browser);
-                } else if (suite === 'model') {
-                     suiteResults = await currentRunner.runModelTests();
-                }
-
-                // Append device to test names to distinguish in report
-                suiteResults.forEach(r => {
-                    r.testName = `${r.testName} [${deviceItem}]`;
-                });
-
-                // Keep reference to a runner for reporting
-                runner = currentRunner;
-                results = results.concat(suiteResults);
-
-                // If we started a check, await it now (it runs in background during tests)
-                if (isFirstRun) {
-                     dllResults = await checkPromise;
-                }
-            }
-        }
-
-        // Reporting
-        if (runner && results.length > 0) {
-            const wallTime = ((Date.now() - startTime) / 1000).toFixed(2);
-            // Sum execution times if available
-            const sumOfTestTimes = results.reduce((acc, r) => acc + (parseFloat(r.executionTime)||0), 0).toFixed(2);
-
-            // Generate HTML
-            // Note: Use env vars for subtitle if available
-            const caseName = process.env.WPT_CASE || process.env.MODEL_CASE;
-
-            const suitesLabel = suites.join('_');
-            const report = runner.generateHtmlReport(suites, caseName, results, dllResults, wallTime, sumOfTestTimes);
-
-            const reportDir = path.join(process.cwd(), 'report');
-            if (!fs.existsSync(reportDir)) fs.mkdirSync(reportDir, { recursive: true });
-
-            const reportPath = path.join(reportDir, `webnn-report-${suitesLabel}-${Date.now()}.html`);
-            fs.writeFileSync(reportPath, report);
-            console.log(`Report generated at: ${reportPath}`);
-
-            // Email
-            if (process.env.EMAIL_TO || process.env.EMAIL_ADDRESS) {
-                 const emailTo = process.env.EMAIL_TO || process.env.EMAIL_ADDRESS;
-                 await runner.sendEmailReport(emailTo, suites, results, wallTime, sumOfTestTimes, null, report);
-            }
-        }
-    });
-});
+                   if (process.env.EMAIL_TO) {
+                       await runner.sendEmailReport(process.env.EMAIL_TO, suiteNames, results, wallTime, sumOfTestTimes, null, report);
+                   }
+              }
+          });
+      }
+  });
 }
 

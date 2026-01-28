@@ -5,20 +5,249 @@ const fs = require('fs');
 const os = require('os');
 const { chromium } = require('@playwright/test');
 
+
+async function send_email(subject, content, sender = '', to = '') {
+    // Create PowerShell script to send email via Outlook
+    const powershellScript = `
+try {
+    $outlook = New-Object -ComObject Outlook.Application
+    $mail = $outlook.CreateItem(0)  # olMailItem = 0
+
+    $mail.Subject = "${subject}"
+    $mail.HTMLBody = @'
+${content}
+'@
+
+    # Set recipient
+    ${to ? `$mail.To = "${to}"` : ''}
+    ${sender ? `$mail.SentOnBehalfOfName = "${sender}"` : ''}
+
+    # Send the email automatically
+    $mail.Send()
+
+    Write-Host "Email sent successfully${to ? ' to ' + to : ''}"
+    exit 0
+} catch {
+    Write-Host "Error sending email: $($_.Exception.Message)"
+    exit 1
+}`;
+
+    const tempDir = os.tmpdir();
+    const scriptPath = path.join(tempDir, `send-email-${Date.now()}.ps1`);
+
+    try {
+      // Write with BOM to ensure PowerShell reads it correctly as UTF-8
+      fs.writeFileSync(scriptPath, '\ufeff' + powershellScript, 'utf8');
+
+      return new Promise((resolve, reject) => {
+        const powershell = require('child_process').spawn('powershell.exe', [
+          '-ExecutionPolicy', 'Bypass',
+          '-File', scriptPath
+        ], {
+          stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        let stdout = '';
+        let stderr = '';
+
+        powershell.stdout.on('data', (data) => {
+          stdout += data.toString();
+        });
+
+        powershell.stderr.on('data', (data) => {
+          stderr += data.toString();
+        });
+
+        powershell.on('close', (code) => {
+          // Clean up temp file
+          try {
+            if (fs.existsSync(scriptPath)) {
+              fs.unlinkSync(scriptPath);
+            }
+          } catch (e) {
+            console.log('Note: Could not clean up temporary file:', e.message);
+          }
+
+          if (code === 0) {
+            resolve(stdout.trim());
+          } else {
+            console.error('Failed to send email:', stderr.trim());
+            reject(new Error(`PowerShell exited with code ${code}: ${stderr}`));
+          }
+        });
+
+        powershell.on('error', (error) => {
+          reject(error);
+        });
+      });
+
+    } catch (error) {
+      console.error('Error in send_email:', error);
+      throw error;
+    }
+  }
+
+  function _format_driver_date(dateString) {
+    if (!dateString) return '';
+    let datePart = dateString.toString().trim().split(/\s+/)[0];
+    datePart = datePart.replace(/-/g, '/').replace(/\./g, '/');
+
+    if (datePart.includes('/')) {
+        const parts = datePart.split('/');
+        if (parts.length === 3) {
+            if (parts[0].length === 4 && !isNaN(parts[0])) {
+                // YYYY/M/D -> YYYYMMDD
+                return `${parts[0]}${parts[1].padStart(2, '0')}${parts[2].padStart(2, '0')}`;
+            } else {
+                // M/D/YYYY -> YYYYMMDD
+                return `${parts[2]}${parts[0].padStart(2, '0')}${parts[1].padStart(2, '0')}`;
+            }
+        }
+    }
+    return datePart.replace(/\//g, '');
+  }
+
+  function _is_hardware_gpu(gpu) {
+    const name = gpu.Name || '';
+    const pnp = gpu.PNPDeviceID || '';
+    const status = gpu.Status || '';
+    if (name.includes('Microsoft') && (name.includes('Remote Display') || name.includes('Basic Display') || name.includes('Basic Render'))) return false;
+    if (pnp.startsWith('SWD')) return false;
+    if (status && !['ok', 'working properly', ''].includes(status.toLowerCase())) return false;
+    return true;
+  }
+
+  function _is_software_gpu(gpu) {
+    const name = gpu.Name || '';
+    const status = gpu.Status || '';
+    if (name.includes('Microsoft')) {
+        if (name.includes('Remote Display')) return false;
+        if (name.includes('Basic Display') || name.includes('Basic Render')) {
+              if (!status || ['ok', 'working properly', ''].includes(status.toLowerCase())) return true;
+        }
+    }
+    return false;
+  }
+
+  function _is_remote_display_gpu(gpu) {
+    const name = gpu.Name || '';
+    const status = gpu.Status || '';
+    if (name.includes('Microsoft') && name.includes('Remote Display')) {
+        if (!status || ['ok', 'working properly', ''].includes(status.toLowerCase())) return true;
+    }
+    return false;
+  }
+
+  function get_gpu_info() {
+    let name = '';
+    let driver_date = '';
+    let driver_ver = '';
+    let device_id = '';
+    let vendor_id = '';
+
+    if (os.platform() === 'win32') {
+        try {
+            const cmd = 'powershell -c "Get-CimInstance -query \'select * from win32_VideoController\' | Select-Object Name, @{N=\'DriverDate\';E={if($_.DriverDate){([datetime]$_.DriverDate).ToString(\'yyyy/MM/dd\')}}}, DriverVersion, PNPDeviceID, Status | ConvertTo-Json -Compress"';
+            const output = execSync(cmd, { encoding: 'utf8' }).trim();
+
+            if (output) {
+                let gpus = [];
+                try {
+                    const parsed = JSON.parse(output);
+                    gpus = Array.isArray(parsed) ? parsed : [parsed];
+                } catch(e) {
+                    // console.error('Failed to parse GPU info JSON', e);
+                }
+
+                let selectedGpu = null;
+
+                // 1. Hardware
+                for (const gpu of gpus) {
+                    if (_is_hardware_gpu(gpu)) {
+                        selectedGpu = gpu;
+                        break;
+                    }
+                }
+
+                // 2. Software
+                if (!selectedGpu) {
+                    for (const gpu of gpus) {
+                        if (_is_software_gpu(gpu)) {
+                            selectedGpu = gpu;
+                            break;
+                        }
+                    }
+                }
+
+                // 3. Remote
+                if (!selectedGpu) {
+                    for (const gpu of gpus) {
+                        if (_is_remote_display_gpu(gpu)) {
+                            selectedGpu = gpu;
+                            break;
+                        }
+                    }
+                }
+
+                if (selectedGpu) {
+                    name = selectedGpu.Name || '';
+                    driver_date = _format_driver_date(selectedGpu.DriverDate);
+                    driver_ver = selectedGpu.DriverVersion || '';
+                    const pnp = selectedGpu.PNPDeviceID || '';
+
+                    if (pnp && !pnp.startsWith('SWD')) {
+                        const devMatch = pnp.match(/DEV_(.{4})/);
+                        const venMatch = pnp.match(/VEN_(.{4})/);
+                        if (devMatch) device_id = devMatch[1];
+                        if (venMatch) vendor_id = venMatch[1];
+                    } else if (name.includes('Microsoft') && (name.includes('Basic Render') || name.includes('Basic Display') || name.includes('Remote Display'))) {
+                          vendor_id = '1414';
+                          if (name.includes('Basic Render')) device_id = '008c';
+                          else if (name.includes('Basic Display')) device_id = '00ff';
+                          else if (name.includes('Remote Display')) device_id = '008c';
+                    }
+
+                } else {
+                      name = 'Microsoft Basic Render Driver';
+                      vendor_id = '1414';
+                      device_id = '008c';
+                }
+            }
+        } catch (e) {
+            console.error('Failed to get GPU info:', e.message);
+        }
+    }
+
+    return { name, driver_date, driver_ver, device_id, vendor_id };
+  }
+
 async function launchBrowser() {
     // Using flags found in current file + persistent context logic
     const args = [
        '--disable-gpu-watchdog',
        //'--disable-web-security',
        //'--ignore-certificate-errors',
-       '--enable-features=WebMachineLearningNeuralNetwork,WebNNOnnxRuntime',
+       '--enable-features=WebMachineLearningNeuralNetwork',
        '--webnn-ort-ignore-ep-blocklist',
        '--ignore-gpu-blocklist',
        //'--webnn-ort-logging-level=VERBOSE',
    ];
 
    if (process.env.EXTRA_BROWSER_ARGS) {
-       args.push(...process.env.EXTRA_BROWSER_ARGS.split(' '));
+       const extraArgs = process.env.EXTRA_BROWSER_ARGS.split(' ');
+       extraArgs.forEach(arg => {
+           if (arg.startsWith('--enable-features=')) {
+               const matchIndex = args.findIndex(a => a.startsWith('--enable-features='));
+               if (matchIndex !== -1) {
+                   const newValue = arg.split('=')[1];
+                   args[matchIndex] = `${args[matchIndex]},${newValue}`;
+               } else {
+                   args.push(arg);
+               }
+           } else if (arg.trim() !== '') {
+               args.push(arg);
+           }
+       });
    }
 
    const launchOptions = {
@@ -310,6 +539,38 @@ class WebNNRunner {
       testSuites.map(s => s.toUpperCase()).join(', ') :
       testSuites[0].toUpperCase();
 
+    // Add GPU info if any test ran on GPU
+    const hasGpuTest = results.some(r => r.device === 'gpu');
+    let gpuInfoHtml = '';
+    if (hasGpuTest) {
+        let gpuName = 'Unknown GPU';
+        let gpuDriverDate = '';
+        let gpuDriverVer = '';
+        try {
+            const info = get_gpu_info();
+            if (info.name) {
+                gpuName = info.name;
+                gpuDriverDate = info.driver_date;
+                gpuDriverVer = info.driver_ver;
+            }
+        } catch (e) {
+            console.log('[Warning] Could not retrieve GPU info:', e.message);
+        }
+
+        gpuInfoHtml = `
+        <div style="background: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #90caf9;">
+            <h3 style="margin-top: 0; color: #0d47a1;">GPU Information</h3>
+            <div style="display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;">
+                <div style="font-weight: bold; color: #1565c0;">GPU Name:</div>
+                <div>${gpuName}</div>
+                <div style="font-weight: bold; color: #1565c0;">Driver Date:</div>
+                <div>${gpuDriverDate}</div>
+                <div style="font-weight: bold; color: #1565c0;">Driver Version:</div>
+                <div>${gpuDriverVer}</div>
+            </div>
+        </div>`;
+    }
+
     return `
 <!DOCTYPE html>
 <html>
@@ -339,6 +600,8 @@ class WebNNRunner {
     <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #e1e4e8;">
         <h1 style="margin: 0; color: #24292e;">WebNN Test Report</h1>
     </div>
+
+    ${gpuInfoHtml}
 
     <div style="margin-bottom: 20px;">
         <h3>Summary</h3>
@@ -389,72 +652,113 @@ class WebNNRunner {
     </div>
 
     <h3>Detailed Test Results</h3>
-    <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-family: sans-serif;">
-        <thead>
-            <tr>
-                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Suite</th>
-                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Case</th>
-                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Status</th>
-                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Passed Subcases</th>
-                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Failed Subcases</th>
-                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Total Subcases</th>
-                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Success Rate</th>
-                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Retries</th>
-                <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Execution Time</th>
-            </tr>
-        </thead>
-        <tbody>
-            ${results.map(result => {
-              const retryCount = result.retryHistory ? result.retryHistory.length - 1 : 0;
-              const retryInfo = retryCount > 0 ? `${retryCount} retry(ies)` : 'No retries';
-              const statusColor = result.result === 'PASS' ? '#28a745' : result.result === 'FAIL' ? '#dc3545' : '#fd7e14';
-              const statusStyle = `color: ${statusColor}; font-weight: bold;`;
-              const baseTdStyle = "border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;";
+    ${(() => {
+        const resultsByConfig = {};
+        results.forEach(r => {
+            const key = r.configName || 'Default';
+            if (!resultsByConfig[key]) resultsByConfig[key] = [];
+            resultsByConfig[key].push(r);
+        });
 
-              return `
-                <tr>
-                    <td style="${baseTdStyle}"><strong>${(result.suite || 'N/A').toUpperCase()}</strong></td>
-                    <td style="${baseTdStyle}">
-                        <strong>${result.testName}</strong>
-                        ${result.testUrl ? `<br><small><a href="${result.testUrl}" target="_blank" style="color: #0366d6;">${result.testUrl}</a></small>` : ''}
-                        ${result.details && !result.details.includes('Exception') ? `<br><div style="margin-top:4px; font-size: 0.9em; color: #24292e; background: #e6ffed; padding: 5px; border-left: 3px solid #28a745; border-radius: 2px;">${result.details}</div>` : ''}
-                        ${result.fullText && result.hasErrors ? `<br><div style="margin-top:4px; font-size: 0.9em; color: #a00; background: #fff0f0; padding: 5px; border-left: 3px solid #a00; border-radius: 2px;">${result.fullText}</div>` : ''}
-                        ${result.retryHistory && result.retryHistory.length > 1 ? `
-                        <br><details style="margin-top: 5px;">
-                            <summary style="cursor: pointer; color: #0366d6; font-size: 12px;">View Retry History (${retryCount} attempts)</summary>
-                            <div style="margin-top: 5px; padding: 10px; background: #f6f8fa; border-radius: 4px;">
-                                ${result.retryHistory.map((attempt, idx) => `
-                                    <div style="margin: 3px 0; font-size: 11px;">
-                                        <strong>${idx === 0 ? 'Initial' : 'Retry ' + idx}:</strong>
-                                        <span style="color: ${attempt.status === 'PASS' ? '#28a745' : attempt.status === 'FAIL' ? '#dc3545' : '#fd7e14'}; font-weight: bold;">${attempt.status}</span>
-                                        (${attempt.passed}/${attempt.total} passed, ${attempt.failed} failed)
+        return Object.keys(resultsByConfig).map(configName => {
+            const groupResults = resultsByConfig[configName];
+            
+            // Extract configuration info for display
+            // Since a group might contain results from multiple split configs (e.g. diff devices),
+            // we should collect unique values.
+            const uniqueConfigValues = (key) => {
+                const values = [...new Set(groupResults.map(r => r.fullConfig ? r.fullConfig[key] : null).filter(v => v !== null && v !== ''))];
+                return values.length > 0 ? values.join(', ') : 'N/A';
+            };
+
+            const suiteStr = uniqueConfigValues('suite');
+            const deviceStr = uniqueConfigValues('device');
+            const argsStr = uniqueConfigValues('browserArgs');
+            const wptCaseStr = uniqueConfigValues('wptCase');
+            const modelCaseStr = uniqueConfigValues('modelCase');
+
+            let configDisplay = `
+            <div style="background: #f1f8ff; border: 1px solid #c8e1ff; padding: 10px; border-radius: 6px; margin: 10px 0 20px 0; font-size: 14px;">
+                <h4 style="margin: 0 0 10px 0; color: #0366d6;">Configuration Details: ${configName}</h4>
+                <div style="display: grid; grid-template-columns: auto 1fr; gap: 8px;">
+                    <div style="font-weight: bold; color: #24292e;">Suite:</div><div>${suiteStr.toUpperCase()}</div>
+                    <div style="font-weight: bold; color: #24292e;">Device:</div><div>${deviceStr}</div>
+                    ${argsStr !== 'N/A' ? `<div style="font-weight: bold; color: #24292e;">Browser Args:</div><div style="font-family: monospace; background: #fafbfc; padding: 2px 4px; border-radius: 3px;">${argsStr}</div>` : ''}
+                    ${wptCaseStr !== 'N/A' ? `<div style="font-weight: bold; color: #24292e;">WPT Case:</div><div>${wptCaseStr}</div>` : ''}
+                     ${modelCaseStr !== 'N/A' ? `<div style="font-weight: bold; color: #24292e;">Model Case:</div><div>${modelCaseStr}</div>` : ''}
+                </div>
+            </div>`;
+
+            return `
+            <h4>${configName}</h4>
+            ${configDisplay}
+            <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-family: sans-serif;">
+                <thead>
+                    <tr>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Suite</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Case</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Status</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Passed Subcases</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Failed Subcases</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Total Subcases</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Success Rate</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Retries</th>
+                        <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background: #f6f8fa; font-weight: 600;">Execution Time</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${groupResults.map(result => {
+                      const retryCount = result.retryHistory ? result.retryHistory.length - 1 : 0;
+                      const retryInfo = retryCount > 0 ? `${retryCount} retry(ies)` : 'No retries';
+                      const statusColor = result.result === 'PASS' ? '#28a745' : result.result === 'FAIL' ? '#dc3545' : '#fd7e14';
+                      const statusStyle = `color: ${statusColor}; font-weight: bold;`;
+                      const baseTdStyle = "border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;";
+
+                      return `
+                        <tr>
+                            <td style="${baseTdStyle}"><strong>${(result.suite || 'N/A').toUpperCase()}</strong></td>
+                            <td style="${baseTdStyle}">
+                                <strong>${result.testName}</strong>
+                                ${result.testUrl ? `<br><small><a href="${result.testUrl}" target="_blank" style="color: #0366d6;">${result.testUrl}</a></small>` : ''}
+                                ${result.details && !result.details.includes('Exception') ? `<br><div style="margin-top:4px; font-size: 0.9em; color: #24292e; background: #e6ffed; padding: 5px; border-left: 3px solid #28a745; border-radius: 2px;">${result.details}</div>` : ''}
+                                ${result.fullText && result.hasErrors ? `<br><div style="margin-top:4px; font-size: 0.9em; color: #a00; background: #fff0f0; padding: 5px; border-left: 3px solid #a00; border-radius: 2px;">${result.fullText}</div>` : ''}
+                                ${result.retryHistory && result.retryHistory.length > 1 ? `
+                                <br><details style="margin-top: 5px;">
+                                    <summary style="cursor: pointer; color: #0366d6; font-size: 12px;">View Retry History (${retryCount} attempts)</summary>
+                                    <div style="margin-top: 5px; padding: 10px; background: #f6f8fa; border-radius: 4px;">
+                                        ${result.retryHistory.map((attempt, idx) => `
+                                            <div style="margin: 3px 0; font-size: 11px;">
+                                                <strong>${idx === 0 ? 'Initial Run' : 'Retry ' + idx}:</strong>
+                                                <span style="color: ${attempt.status === 'PASS' ? '#28a745' : attempt.status === 'FAIL' ? '#dc3545' : '#fd7e14'}; font-weight: bold;">${attempt.status}</span>
+                                                (${attempt.passed}/${attempt.total} passed, ${attempt.failed} failed)
+                                            </div>
+                                        `).join('')}
                                     </div>
-                                `).join('')}
-                            </div>
-                        </details>
-                        ` : ''}
-                    </td>
-                    <td style="${baseTdStyle} ${statusStyle}">${result.result}</td>
-                    <td style="${baseTdStyle} color: #28a745;">${result.subcases.passed}</td>
-                    <td style="${baseTdStyle} color: #dc3545;">${result.subcases.failed}</td>
-                    <td style="${baseTdStyle}">${result.subcases.total}</td>
-                    <td style="${baseTdStyle}">${result.subcases.total > 0 ? ((result.subcases.passed/result.subcases.total)*100).toFixed(1) : 0}%</td>
-                    <td style="${baseTdStyle} font-size: 12px; color: #586069;">${retryInfo}</td>
-                    <td style="${baseTdStyle}">${result.executionTime ? result.executionTime + 's' : 'N/A'}</td>
-                </tr>
-              `;
-            }).join('')}
-            <tr style="background: #e8f5e9; font-weight: bold;">
-                <td colspan="3" style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;"><strong>TOTAL</strong></td>
-                <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; color: #28a745;"><strong>${passedSubcases}</strong></td>
-                <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; color: #dc3545;"><strong>${failedSubcases}</strong></td>
-                <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;"><strong>${totalSubcases}</strong></td>
-                <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;"><strong>${totalSubcases > 0 ? ((passedSubcases/totalSubcases)*100).toFixed(1) : 0}%</strong></td>
-                <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;"><strong>${results.filter(r => r.retryHistory && r.retryHistory.length > 1).length} tests retried</strong></td>
-                <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;"><strong>${displaySumOfTimes}s</strong></td>
-            </tr>
-        </tbody>
-    </table>
+                                </details>
+                                ` : ''}
+                            </td>
+                            <td style="${baseTdStyle} ${statusStyle}">${result.result}</td>
+                            <td style="${baseTdStyle} color: #28a745;"><strong>${result.subcases.passed}</strong></td>
+                            <td style="${baseTdStyle} color: #dc3545;"><strong>${result.subcases.failed}</strong></td>
+                            <td style="${baseTdStyle}"><strong>${result.subcases.total}</strong></td>
+                            <td style="${baseTdStyle}"><strong>${result.subcases.total > 0 ? ((result.subcases.passed/result.subcases.total)*100).toFixed(1) : 0}%</strong></td>
+                            <td style="${baseTdStyle} font-size: 12px; color: #586069;">${retryInfo}</td>
+                            <td style="${baseTdStyle}"><strong>${result.executionTime ? result.executionTime + 's' : 'N/A'}</strong></td>
+                        </tr>
+                      `;
+                    }).join('')}
+                    <tr style="background: #e8f5e9; font-weight: bold;">
+                        <td colspan="3" style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;"><strong>TOTAL (${configName})</strong></td>
+                        <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; color: #28a745;"><strong>${groupResults.reduce((s,r)=>s+r.subcases.passed,0)}</strong></td>
+                        <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; color: #dc3545;"><strong>${groupResults.reduce((s,r)=>s+r.subcases.failed,0)}</strong></td>
+                        <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;"><strong>${groupResults.reduce((s,r)=>s+r.subcases.total,0)}</strong></td>
+                        <td colspan="3" style="border: 1px solid #e1e4e8; padding: 8px 12px;"></td>
+                    </tr>
+                </tbody>
+            </table>
+            `;
+        }).join('');
+    })()}
 
     ${results.filter(r => r.retryHistory && r.retryHistory.length > 1).length > 0 ? `
     <h3>Retry Analysis</h3>
@@ -612,17 +916,7 @@ class WebNNRunner {
       const os = require('os');
       const machineName = os.hostname();
 
-      // Get GPU info
-      let gpuName = 'Unknown GPU';
-      try {
-        const base = require('../../util/base');
-        const gpuInfo = base.get_gpu_info();
-        if (gpuInfo.name) {
-            gpuName = gpuInfo.name;
-        }
-      } catch (e) {
-        console.log('[Warning] Could not retrieve GPU info:', e.message);
-      }
+      // GPU info is no longer needed in the subject, only in the report body if applicable
 
       // Use provided timestamp (from report filename) or generate new one
       const timestamp = reportTimestamp || (() => {
@@ -635,15 +929,13 @@ class WebNNRunner {
                now.getSeconds().toString().padStart(2, '0');
       })();
 
-      // Create email subject: [WebNN Test Report] timestamp | machine name | gpu type
-      const subject = `[WebNN Test Report] ${timestamp} | ${machineName} | ${gpuName}`;
+      // Create email subject: [WebNN Test Report] timestamp | machine name
+      const subject = `[WebNN Test Report] ${timestamp} | ${machineName}`;
 
       // Use provided HTML content or generate new one
       const htmlBody = htmlReportContent || this.generateHtmlReport(testSuites, null, results, null, wallTime, sumOfTestTimes);
 
-      // Use send_email from util/base.js
-      const base = require('../../util/base');
-      await base.send_email(subject, htmlBody, '', emailAddress);
+      await send_email(subject, htmlBody, '', emailAddress);
 
       console.log(`[Success] Email sent successfully to ${emailAddress}`);
     } catch (error) {

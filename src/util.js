@@ -779,6 +779,30 @@ class WebNNRunner {
             const wptCaseStr = uniqueConfigValues('wptCase');
             const modelCaseStr = uniqueConfigValues('modelCase');
 
+            // Calculate Group Summary
+            const groupTotal = groupResults.length;
+            const groupPassed = groupResults.filter(r => r.result === 'PASS').length;
+            const groupFailed = groupResults.filter(r => r.result === 'FAIL').length;
+            const groupErrors = groupResults.filter(r => r.result === 'ERROR').length;
+            const groupTotalSubcases = groupResults.reduce((s,r)=>s+r.subcases.total,0);
+            const groupPassedSubcases = groupResults.reduce((s,r)=>s+r.subcases.passed,0);
+            const groupFailedSubcases = groupResults.reduce((s,r)=>s+r.subcases.failed,0);
+            const successRate = groupTotalSubcases > 0 ? ((groupPassedSubcases / groupTotalSubcases) * 100).toFixed(1) : '0.0';
+
+            const groupSummaryHtml = `
+            <div style="display: flex; gap: 15px; margin-bottom: 15px; font-size: 14px; background-color: #fff; padding: 12px; border: 1px solid #e1e4e8; border-radius: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                 <div style="font-weight: bold; color: #24292e;">Cases: ${groupTotal}</div>
+                 <div style="font-weight: bold; color: #28a745;">Pass: ${groupPassed}</div>
+                 <div style="font-weight: bold; color: #dc3545;">Fail: ${groupFailed}</div>
+                 ${groupErrors > 0 ? `<div style="font-weight: bold; color: #fd7e14;">Error: ${groupErrors}</div>` : ''}
+                 <div style="width: 1px; background-color: #e1e4e8; margin: 0 5px;"></div>
+                 <div style="font-weight: bold; color: #24292e;">Subcases: ${groupTotalSubcases}</div>
+                 <div style="font-weight: bold; color: #28a745;">Pass: ${groupPassedSubcases}</div>
+                 <div style="font-weight: bold; color: #dc3545;">Fail: ${groupFailedSubcases}</div>
+                 <div style="width: 1px; background-color: #e1e4e8; margin: 0 5px;"></div>
+                 <div style="font-weight: bold; color: ${successRate >= 100 ? '#28a745' : '#24292e'};">Success Rate: ${successRate}%</div>
+            </div>`;
+
             let configDisplay = `
             <div style="background-color: #f1f8ff; border: 1px solid #c8e1ff; padding: 10px; border-radius: 6px; margin: 10px 0 20px 0; font-size: 14px;">
                 <h4 style="margin: 0 0 10px 0; color: #0366d6;">Configuration Details: ${configName}</h4>
@@ -794,6 +818,7 @@ class WebNNRunner {
             return `
             <h4>${configName}</h4>
             ${configDisplay}
+            ${groupSummaryHtml}
             <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-family: sans-serif;">
                 <thead>
                     <tr>

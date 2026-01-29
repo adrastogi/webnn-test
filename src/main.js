@@ -39,6 +39,7 @@ Options:
   --email [address]        Send email report
   --pause <case>           Pause execution on failure
   --browser-path <path>    Custom path to browser executable
+  --skip-retry             Skip the retry stage for failed tests
 
 Test Selection:
   --wpt-case <filter>      Run specific WPT test cases
@@ -98,6 +99,7 @@ Examples:
 
   const globalExtraArgs = getArg('--browser-arg');
   const browserPath = getArg('--browser-path');
+  const skipRetry = args.includes('--skip-retry');
   const configFile = getArg('--config');
   const pauseCase = getArg('--pause');
   const wptRange = getArg('--wpt-range');
@@ -175,6 +177,7 @@ Examples:
       process.env.EMAIL_TO = emailAddress;
   }
   if (browserPath) process.env.BROWSER_PATH = browserPath;
+  if (skipRetry) process.env.SKIP_RETRY = 'true';
 
   delete process.env.TEST_SUITE;
   delete process.env.DEVICE;
@@ -393,7 +396,6 @@ Examples:
 
 
                    runRes.forEach(r => {
-                       r.testName = `[${config.name}] ${r.testName}`;
                        r.configName = config.name;
                        r.device = config.device;
                        r.fullConfig = config;

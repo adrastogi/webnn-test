@@ -189,88 +189,92 @@ class WptRunner extends WebNNRunner {
     const failures = results.filter(r => r.result !== 'PASS');
 
     if (failures.length > 0) {
-        console.log(`\n[Warning]  First pass complete. Found ${failures.length} failures. Starting retries...`);
-        console.log(`[Info] Closing main browser context to ensure fresh environments for retries.`);
+        if (process.env.SKIP_RETRY === 'true') {
+            console.log(`\n[Info]  Found ${failures.length} failures. Skipping retries (SKIP_RETRY is set).`);
+        } else {
+            console.log(`\n[Warning]  First pass complete. Found ${failures.length} failures. Starting retries...`);
+            console.log(`[Info] Closing main browser context to ensure fresh environments for retries.`);
 
-        // Close Phase 1 browser/context to release resources/locks (important for PersistentContext)
-        // Use currentContext/currentBrowser in case restarts happened during execution
-        try {
-           if (currentContext) await currentContext.close();
-           if (currentBrowser && currentBrowser !== currentContext) await currentBrowser.close();
+            // Close Phase 1 browser/context to release resources/locks (important for PersistentContext)
+            // Use currentContext/currentBrowser in case restarts happened during execution
+            try {
+               if (currentContext) await currentContext.close();
+               if (currentBrowser && currentBrowser !== currentContext) await currentBrowser.close();
 
-           // Also try closing original context if different, just in case
-           if (context && context !== currentContext) await context.close();
-        } catch(e) {
-           console.log(`Ignorable error closing main browser: ${e.message}`);
-        }
-
-        for (let i = 0; i < failures.length; i++) {
-            const result = failures[i];
-            const testFile = result.fileName;
-            const maxRetries = 3;
-            let attempt = 1;
-            // Initialize history with the failure from the first pass
-            let retryHistory = [{
-                attempt: 0,
-                status: result.result,
-                passed: result.subcases ? result.subcases.passed : 0,
-                failed: result.subcases ? result.subcases.failed : 0,
-                total: result.subcases ? result.subcases.total : 0
-            }];
-
-            console.log(`\n[Retry] [${i+1}/${failures.length}] Retrying: ${result.testName}`);
-
-            while (attempt <= maxRetries) {
-                let retryInstance = null;
-                try {
-                    // "for each retry, we should launch a new browser context"
-                    retryInstance = await this.launchNewBrowser();
-                    const retryPage = retryInstance.page;
-
-                    const res = await this.runSingleWptTest(retryPage, testFile, -1, -1, attempt);
-
-                    retryHistory.push({
-                        attempt,
-                        status: res.result,
-                        passed: res.subcases.passed,
-                        failed: res.subcases.failed,
-                        total: res.subcases.total
-                    });
-
-                    // Update result if passed or stabilized
-                    if (res.result === 'PASS') {
-                         console.log(`[Success] Retry ${attempt} PASSED!`);
-                         result.result = 'PASS';
-                         result.subcases = res.subcases;
-                         result.retryHistory = retryHistory;
-                         break; // Stop retrying this case
-                    } else {
-                         // Check if result is same as previous (using helper from base class)
-                         if (this.compareTestResults(result, res)) {
-                             console.log(`[Warning]  Retry ${attempt} result matches previous failure. Stopping retries for this case.`);
-                             result.retryHistory = retryHistory;
-                             break;
-                         }
-                         // Update result to latest failure
-                         result.subcases = res.subcases;
-                         // result.error = res.error; // Update error?
-                    }
-
-                } catch (e) {
-                    console.error(`[Fail] Error during retry ${attempt}: ${e.message}`);
-                    retryHistory.push({ attempt, status: 'ERROR', error: e.message });
-                } finally {
-                    if (retryInstance) {
-                        try {
-                           if (retryInstance.page && !retryInstance.page.isClosed()) await retryInstance.page.close();
-                           if (retryInstance.context) await retryInstance.context.close();
-                           if (retryInstance.browser && retryInstance.browser !== retryInstance.context) await retryInstance.browser.close();
-                        } catch(e) {}
-                    }
-                }
-                attempt++;
+               // Also try closing original context if different, just in case
+               if (context && context !== currentContext) await context.close();
+            } catch(e) {
+               console.log(`Ignorable error closing main browser: ${e.message}`);
             }
-            if (!result.retryHistory) result.retryHistory = retryHistory;
+
+            for (let i = 0; i < failures.length; i++) {
+                const result = failures[i];
+                const testFile = result.fileName;
+                const maxRetries = 3;
+                let attempt = 1;
+                // Initialize history with the failure from the first pass
+                let retryHistory = [{
+                    attempt: 0,
+                    status: result.result,
+                    passed: result.subcases ? result.subcases.passed : 0,
+                    failed: result.subcases ? result.subcases.failed : 0,
+                    total: result.subcases ? result.subcases.total : 0
+                }];
+
+                console.log(`\n[Retry] [${i+1}/${failures.length}] Retrying: ${result.testName}`);
+
+                while (attempt <= maxRetries) {
+                    let retryInstance = null;
+                    try {
+                        // "for each retry, we should launch a new browser context"
+                        retryInstance = await this.launchNewBrowser();
+                        const retryPage = retryInstance.page;
+
+                        const res = await this.runSingleWptTest(retryPage, testFile, -1, -1, attempt);
+
+                        retryHistory.push({
+                            attempt,
+                            status: res.result,
+                            passed: res.subcases.passed,
+                            failed: res.subcases.failed,
+                            total: res.subcases.total
+                        });
+
+                        // Update result if passed or stabilized
+                        if (res.result === 'PASS') {
+                             console.log(`[Success] Retry ${attempt} PASSED!`);
+                             result.result = 'PASS';
+                             result.subcases = res.subcases;
+                             result.retryHistory = retryHistory;
+                             break; // Stop retrying this case
+                        } else {
+                             // Check if result is same as previous (using helper from base class)
+                             if (this.compareTestResults(result, res)) {
+                                 console.log(`[Warning]  Retry ${attempt} result matches previous failure. Stopping retries for this case.`);
+                                 result.retryHistory = retryHistory;
+                                 break;
+                             }
+                             // Update result to latest failure
+                             result.subcases = res.subcases;
+                             // result.error = res.error; // Update error?
+                        }
+
+                    } catch (e) {
+                        console.error(`[Fail] Error during retry ${attempt}: ${e.message}`);
+                        retryHistory.push({ attempt, status: 'ERROR', error: e.message });
+                    } finally {
+                        if (retryInstance) {
+                            try {
+                               if (retryInstance.page && !retryInstance.page.isClosed()) await retryInstance.page.close();
+                               if (retryInstance.context) await retryInstance.context.close();
+                               if (retryInstance.browser && retryInstance.browser !== retryInstance.context) await retryInstance.browser.close();
+                            } catch(e) {}
+                        }
+                    }
+                    attempt++;
+                }
+                if (!result.retryHistory) result.retryHistory = retryHistory;
+            }
         }
     }
 

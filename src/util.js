@@ -520,6 +520,83 @@ class WebNNRunner {
   }
 
   async checkOnnxruntimeDlls(processName = 'chrome.exe', retries = 3) {
+    const MAX_RETRIES = retries;
+    let attempt = 0;
+
+    console.log(`[Info] Checking for ONNX Runtime DLLs in ${processName} (GPU Process)...`);
+
+    while (attempt <= MAX_RETRIES) {
+        try {
+            // 1. Find GPU Process ID
+            const cmdFind = `Get-WmiObject -Class Win32_Process -Filter "Name='${processName}'" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress`;
+            // Increase maxBuffer just in case
+            const stdout = execSync(cmdFind, { encoding: 'utf8', maxBuffer: 1024 * 1024, shell: 'powershell.exe' }).trim();
+
+            if (!stdout) throw new Error(`Process ${processName} not found`);
+
+            let processes = [];
+            try {
+                const parsed = JSON.parse(stdout);
+                processes = Array.isArray(parsed) ? parsed : [parsed];
+            } catch(e) {
+                // Single object or parse error
+            }
+
+            const gpuProcess = processes.find(p => p.CommandLine && p.CommandLine.includes('--type=gpu-process'));
+
+            if (!gpuProcess) {
+                 // If no GPU process, maybe it hasn't started yet or running in single process mode?
+                 // But for WebNN/WebGL usually there is one.
+                 throw new Error('GPU process not found');
+            }
+
+            const pid = gpuProcess.ProcessId;
+
+            // 2. Get Modules from that process
+            // Usage of depth 2 is often enough for FileVersionInfo
+            const cmdModules = `Get-Process -Id ${pid} | Select-Object -ExpandProperty Modules | Select-Object ModuleName, FileName, @{N='ProductVersion';E={$_.FileVersionInfo.ProductVersion}} | ConvertTo-Json -Compress`;
+            
+            const modulesJson = execSync(cmdModules, { encoding: 'utf8', maxBuffer: 1024 * 1024 * 5, shell: 'powershell.exe' }).trim();
+            
+            if (!modulesJson) throw new Error('Failed to retrieve modules from GPU process');
+
+            let modules = [];
+            try {
+                const parsed = JSON.parse(modulesJson);
+                modules = Array.isArray(parsed) ? parsed : [parsed];
+            } catch(e) { }
+
+            // 3. Filter for ONNX Runtime related DLLs
+            const findings = modules.filter(m => {
+                const name = (m.ModuleName || '').toLowerCase();
+                return name.includes('onnxruntime') || name.includes('openvino') || name.includes('directml');
+            });
+
+            if (findings.length > 0) {
+                 const dllsOutput = findings.map(m => {
+                     return `${m.FileName} (Version: ${m.ProductVersion || 'Unknown'})`;
+                 }).join('\n');
+                 
+                 console.log(`[Success] ONNX Runtime/Backend DLLs found:\n${dllsOutput}`);
+                 return { found: true, dlls: dllsOutput, dllCount: findings.length };
+            } else {
+                 throw new Error('No ONNX Runtime/Backend DLLs found in GPU process modules');
+            }
+
+        } catch (e) {
+            console.log(`[Warning] DLL Check Attempt ${attempt + 1} failed: ${e.message}`);
+            
+            if (attempt < MAX_RETRIES) {
+                attempt++;
+                await new Promise(r => setTimeout(r, 2000));
+            } else {
+                return { found: false, error: e.message };
+            }
+        }
+    }
+  }
+
+  async checkOnnxruntimeDlls_ListDlls(processName = 'chrome.exe', retries = 3) {
     return new Promise((resolve) => {
       console.log(`[Info] Checking for ONNX Runtime DLLs in ${processName} process... (Attempts remaining: ${retries + 1})`);
 

@@ -1,0 +1,8 @@
+[
+    {
+        "name": "ORT model",
+        "browser-arg": "--enable-features=WebNNOnnxRuntime",
+        "suite": "model",
+        "device": "cpu,gpu,npu"
+    }
+]

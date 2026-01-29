@@ -45,7 +45,7 @@ class ModelRunner extends WebNNRunner {
         func: this.runModelSdxl
       },
       'phi': {
-        name: 'WebNN Developer Preview Phi-3 WebGPU',
+        name: 'WebNN Developer Preview Phi WebGPU',
         url: 'https://microsoft.github.io/webnn-developer-preview/demos/text-generation/',
         type: 'preview',
         func: this.runModelPhi
@@ -218,42 +218,42 @@ class ModelRunner extends WebNNRunner {
          await this.page.click('//*[@id="predict"]');
       } catch (e) { throw new Error('Could not click Predict button: ' + e.message); }
 
-      let firstLabel = null;
-      let firstProb = null;
+      let buildTime = null;
+      let inferenceTime = null;
       let checkCount = 0;
       const maxChecks = 30; // 15s
 
-      while (checkCount < maxChecks && firstLabel === null) {
+      while (checkCount < maxChecks && (buildTime === null || inferenceTime === null)) {
         checkCount++;
-        const probResult = await this.page.evaluate(() => {
-           const labelEl = document.querySelector('#label0');
-           const probEl = document.querySelector('#prob0');
-           if (labelEl && probEl && labelEl.innerText.trim() !== '' && probEl.innerText.trim() !== '') {
-             return { label: labelEl.innerText.trim(), prob: probEl.innerText.trim() };
+        const result = await this.page.evaluate(() => {
+           const buildTimeEl = document.getElementById('buildTime');
+           const inferenceTimeEl = document.getElementById('inferenceTime');
+           if (buildTimeEl && inferenceTimeEl && buildTimeEl.innerText.trim() !== '' && inferenceTimeEl.innerText.trim() !== '') {
+             return { buildTime: buildTimeEl.innerText.trim(), inferenceTime: inferenceTimeEl.innerText.trim() };
            }
            return null;
         });
 
-        if (probResult) {
-            firstLabel = probResult.label;
-            firstProb = probResult.prob;
+        if (result) {
+            buildTime = result.buildTime;
+            inferenceTime = result.inferenceTime;
         } else {
             await this.page.waitForTimeout(500);
         }
       }
 
-      if (firstLabel) {
-        console.log(`Got LeNet result: Label=${firstLabel}, Prob=${firstProb}`);
+      if (buildTime && inferenceTime) {
+        console.log(`Got LeNet result: ${buildTime}, ${inferenceTime}`);
         results.push({
             testName: testName,
             testUrl: testUrl,
             result: 'PASS',
-            details: `Label: ${firstLabel}, Probability: ${firstProb}`,
+            details: `${buildTime}, ${inferenceTime}`,
             subcases: { total: 1, passed: 1, failed: 0 },
             suite: 'model'
         });
       } else {
-         throw new Error('Timeout waiting for inference results #label0/#prob0');
+         throw new Error('Timeout waiting for inference results buildTime/inferenceTime');
       }
 
     } catch (error) {
@@ -468,23 +468,17 @@ class ModelRunner extends WebNNRunner {
       await this.page.waitForTimeout(3000);
 
       // 1. Select Backend
-      console.log(`Begin to select backend: ${device}`);
       try {
         await this.page.waitForLoadState('domcontentloaded');
         const labelText = device === 'npu' ? 'WebNN (NPU)' :
                           device === 'gpu' ? 'WebNN (GPU)' : 'WebNN (CPU)';
-        console.log(`Looking for backend button with text: "${labelText}"`);
 
-        // Avoid ID selectors like #backendBtns as they are unreliable here
         const targetLabel = this.page.locator('label').filter({ hasText: labelText }).first();
 
         try {
             await targetLabel.waitFor({ state: 'visible', timeout: 5000 });
             await targetLabel.click();
-            console.log(`[Success] Clicked backend button: ${labelText}`);
         } catch (waitError) {
-             console.warn(`[Warn] Button "${labelText}" not found. Trying fallback checks...`);
-
              if (device === 'npu') {
                  console.log('NPU button missing, skipping test.');
                  results.push({
@@ -498,31 +492,27 @@ class ModelRunner extends WebNNRunner {
                 return;
              }
 
-             // Fallback for CPU/GPU: Try broad match for current device name
+             // Fallback for CPU/GPU
              const shortText = device.toUpperCase();
              const shortLabel = this.page.locator('label').filter({ hasText: shortText }).first();
              if (await shortLabel.count() > 0 && await shortLabel.isVisible()) {
-                 console.log(`[Fallback] Clicking label with text "${shortText}"`);
                  await shortLabel.click();
              } else {
-                 throw new Error(`Backend button for ${device} not found (timeout).`);
+                 throw new Error(`Backend button for ${device} not found.`);
              }
         }
       } catch (e) { throw new Error(`Could not click backend button for ${device}: ` + e.message); }
 
       // 2. Select Data Type (Float 32)
-      console.log('begin to select data type (Float32)...');
       try {
           await this.page.click('//*[@id="dataTypeBtns"]/label[1]');
       } catch (e) {
-          console.log('Data Type selection failed or skipped:', e.message);
       }
 
       // 3. Select Model
-      console.log('Waiting for model options to be ready...');
       try {
         await this.page.waitForSelector('#modelBtns', { state: 'visible', timeout: 5000 });
-      } catch(e) { console.log('Timeout waiting for #modelBtns'); }
+      } catch(e) {}
 
       await this.page.waitForTimeout(1000);
 
@@ -531,36 +521,22 @@ class ModelRunner extends WebNNRunner {
       try {
          if (await hintEl.isVisible()) {
             const hintText = (await hintEl.innerText()).toUpperCase();
-            console.log(`[Debug] Hint text: "${hintText}"`);
             if (!hintText.includes('NO MODEL SELECTED')) {
-               console.log('[Debug] Skipping model selection (Hint does not say NO MODEL SELECTED)');
                shouldSelect = false;
             }
          }
-      } catch(e) { console.log('Error checking hint:', e.message); }
+      } catch(e) {}
 
       if (shouldSelect) {
-          console.log('[Debug] Proceeding to select "Tiny Yolo V2" model...');
           try {
-              // Debug: List all available labels in #modelBtns
-              const allLabels = await this.page.locator('#modelBtns label').allInnerTexts();
-              console.log('[Debug] Available model labels:', allLabels);
-
-              // Try finding the specific label with text "Tiny Yolo V2"
               const modelLabel = this.page.locator('#modelBtns label').filter({ hasText: 'Tiny Yolo V2' }).first();
-
               if (await modelLabel.count() > 0 && await modelLabel.isVisible()) {
-                  console.log('[Debug] Found "Tiny Yolo V2" label, clicking...');
                   await modelLabel.click();
-                  console.log('[Debug] Clicked "Tiny Yolo V2"');
               } else {
-                  console.warn('[Debug] Specific "Tiny Yolo V2" label not found or not visible.');
-                  console.log('[Debug] Fallback: clicking first label in #modelBtns');
                   await this.page.click('//*[@id="modelBtns"]/label[1]');
-                  console.log('[Debug] Clicked first label');
               }
           } catch (e) {
-              console.warn('[Debug] Model selection failed with error:', e.message);
+              console.warn('Model selection failed:', e.message);
           }
       }
 
@@ -600,12 +576,17 @@ class ModelRunner extends WebNNRunner {
 
   async runModelImageClassification(results, modelDef) {
     const testName = modelDef.name;
-    let testUrl = modelDef.url;
     const device = process.env.DEVICE || 'cpu';
-    if (device) testUrl += `?devicetype=${device}`;
+
+    // Construct URL with params for auto-run and selection
+    // ?provider=webnn&devicetype=<device>&model=resnet-50&run=5
+    const baseUrl = modelDef.url.split('?')[0];
+    const testUrl = `${baseUrl}?provider=webnn&devicetype=${device}&model=resnet-50&run=5`;
 
     try {
       console.log(`Running preview test: ${testName} on ${device}`);
+      console.log(`Navigating to: ${testUrl}`);
+
       await this.page.goto(testUrl);
       await this.page.waitForLoadState('networkidle');
 
@@ -632,12 +613,12 @@ class ModelRunner extends WebNNRunner {
         } catch (error) {}
       }
 
-      if (!classifyButton || !(await classifyButton.isVisible())) {
-        throw new Error('Could not find Classify button');
+      if (classifyButton && await classifyButton.isVisible()) {
+        await classifyButton.click();
+        console.log('[Success] Clicked Classify button');
+      } else {
+        console.log('Classify button not found, assuming auto-run from URL params');
       }
-
-      await classifyButton.click();
-      console.log('[Success] Clicked Classify button');
 
       let latencyFound = false;
       let latencyValue = null;
@@ -687,10 +668,14 @@ class ModelRunner extends WebNNRunner {
 
   async runModelSdxl(results, modelDef) {
     const testName = modelDef.name;
-    let testUrl = modelDef.url;
     const device = process.env.DEVICE || 'cpu';
-    if (device) testUrl += `?devicetype=${device}`;
+
+    // Construct URL: https://.../?devicetype=<device>
+    const baseUrl = modelDef.url.split('?')[0];
+    const testUrl = `${baseUrl}?devicetype=${device}`;
+
     console.log(`Running preview test: ${testName} on ${device}`);
+    console.log(`Navigating to: ${testUrl}`);
 
     try {
       await this.page.goto(testUrl);
@@ -743,10 +728,14 @@ class ModelRunner extends WebNNRunner {
 
   async runModelPhi(results, modelDef) {
       const testName = modelDef.name;
-      let testUrl = modelDef.url;
       const device = process.env.DEVICE || 'cpu';
-      if (device) testUrl += `?devicetype=${device}`;
+
+      // Construct URL: ?provider=webnn&devicetype=<device>&model=phi4mini
+      const baseUrl = modelDef.url.split('?')[0];
+      const testUrl = `${baseUrl}?provider=webnn&devicetype=${device}&model=phi4mini`;
+
       console.log(`Running preview test: ${testName} on ${device}`);
+      console.log(`Navigating to: ${testUrl}`);
 
       try {
         await this.page.goto(testUrl);
@@ -815,10 +804,14 @@ class ModelRunner extends WebNNRunner {
 
   async runModelSam(results, modelDef) {
     const testName = modelDef.name;
-    let testUrl = modelDef.url;
     const device = process.env.DEVICE || 'cpu';
-    if (device) testUrl += `?devicetype=${device}`;
+
+    // Construct URL: ?devicetype=<device>
+    const baseUrl = modelDef.url.split('?')[0];
+    const testUrl = `${baseUrl}?devicetype=${device}`;
+
     console.log(`Running preview test: ${testName} on ${device}`);
+    console.log(`Navigating to: ${testUrl}`);
 
     try {
         await this.page.goto(testUrl);
@@ -875,10 +868,14 @@ class ModelRunner extends WebNNRunner {
 
   async runModelWhisper(results, modelDef) {
       const testName = modelDef.name;
-      let testUrl = modelDef.url;
       const device = process.env.DEVICE || 'cpu';
-      if (device) testUrl += `?devicetype=${device}`;
+
+      // Construct URL: ?devicetype=<device>
+      const baseUrl = modelDef.url.split('?')[0];
+      const testUrl = `${baseUrl}?devicetype=${device}`;
+
       console.log(`Running preview test: ${testName} on ${device}`);
+      console.log(`Navigating to: ${testUrl}`);
 
       try {
           await this.page.goto(testUrl);

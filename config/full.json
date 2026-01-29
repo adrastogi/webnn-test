@@ -1,0 +1,14 @@
+[
+    {
+        "name": "ORT wpt",
+        "browser-arg": "--enable-features=WebNNOnnxRuntime",
+        "suite": "wpt",
+        "device": "cpu,gpu,npu"
+    },
+    {
+        "name": "ORT model",
+        "browser-arg": "--enable-features=WebNNOnnxRuntime",
+        "suite": "model",
+        "device": "cpu,gpu,npu"
+    }
+]

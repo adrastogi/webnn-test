@@ -18,6 +18,9 @@ npm install
 ## Running Tests
 
 ```bash
+# Run with configuration file
+node src/main.js --config config/example.json
+
 # Run all WPT tests (--suite wpt is default)
 node src/main.js
 node src/main.js --suite wpt
@@ -41,6 +44,27 @@ node src/main.js --suite wpt --wpt-case "add,sub" --repeat 3
 
 # Combine options
 node src/main.js --suite wpt --wpt-case "add,sub" --jobs 2 --repeat 3 --chrome-channel canary
+```
+
+## Configuration File
+
+Use `--config` to run tests defined in a JSON file. This allows defining complex test suites with specific devices and browser arguments.
+
+```bash
+node src/main.js --config config/example.json
+```
+
+Example configuration format:
+```json
+[
+    {
+        "name": "ORT WPT",
+        "browser-arg": "--enable-features=WebNNOnnxRuntime",
+        "suite": "wpt",
+        "wpt-case": "add",
+        "device": "cpu,gpu"
+    }
+]
 ```
 
 ## Test Case Selection
@@ -132,16 +156,16 @@ node src/main.js --suite wpt --chrome-channel beta
 
 **Supported channels:** stable (default), canary, dev, beta
 
-## Extra Browser Arguments
+## Browser Arguments
 
-Pass extra arguments to the browser launch sequence using `--extra-browser-arg`:
+Pass extra arguments to the browser launch sequence using `--browser-arg`:
 
 ```bash
 # Pass GPU selection flags
-node src/main.js --suite wpt --extra-browser-arg "--webnn-ort-ep-device=WebGpuExecutionProvider,0x8086,0x7d55"
+node src/main.js --suite wpt --browser-arg "--webnn-ort-ep-device=WebGpuExecutionProvider,0x8086,0x7d55"
 
 # Pass multiple arguments
-node src/main.js --suite wpt --extra-browser-arg "--use-gl=angle --use-angle=gl"
+node src/main.js --suite wpt --browser-arg "--use-gl=angle --use-angle=gl"
 ```
 
 ## Test Reports

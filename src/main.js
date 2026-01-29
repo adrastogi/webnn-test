@@ -33,9 +33,9 @@ Options:
   --list                   List all test cases in the specified suite
   --jobs <number>          Number of parallel jobs (default: 4)
   --repeat <number>        Number of times to repeat the test run (default: 1)
-  --device <type>          Device type to use (default: cpu). Values: cpu, gpu, npu
+  --device <type>          Device type to use (default: gpu). Values: cpu, gpu, npu
   --chrome-channel <name>  Chrome channel to use (default: canary). Values: stable, canary, dev, beta
-  --extra-browser-arg <args> Extra arguments for browser launch
+  --browser-arg <arg>     Extra arguments for browser launch, split by space
   --email [address]        Send email report
   --pause <case>           Pause execution on failure
   --browser-path <path>    Custom path to browser executable
@@ -96,7 +96,7 @@ Examples:
 
   let playwrightChannel = (chromeChannel === 'stable') ? 'chrome' : `chrome-${chromeChannel}`;
 
-  const globalExtraArgs = getArg('--extra-browser-arg');
+  const globalExtraArgs = getArg('--browser-arg');
   const browserPath = getArg('--browser-path');
   const configFile = getArg('--config');
   const pauseCase = getArg('--pause');
@@ -115,12 +115,12 @@ Examples:
           const rawConfigs = JSON.parse(fs.readFileSync(configPath, 'utf8'));
           // Normalize configs and expand devices
           runConfigs = rawConfigs.flatMap((item, idx) => {
-               const devices = (item.device || 'cpu').split(',').map(d => d.trim()).filter(Boolean);
+               const devices = (item.device || 'gpu').split(',').map(d => d.trim()).filter(Boolean);
                return devices.map(device => ({
                   name: item.name || `Config_${idx+1}`,
                   suite: item.suite || 'wpt',
                   device: device,
-                  browserArgs: item['extra-browser-arg'] ? `${globalExtraArgs || ''} ${item['extra-browser-arg']}`.trim() : globalExtraArgs,
+                  browserArgs: item['browser-arg'] ? `${globalExtraArgs || ''} ${item['browser-arg']}`.trim() : globalExtraArgs,
                   wptCase: item['wpt-case'] || null,
                   modelCase: item['model-case'] || null,
                   wptRange: null,
@@ -137,7 +137,7 @@ Examples:
       let deviceArg = getArg('--device');
       if (!deviceArg) {
           const dVal = getArgValue('--device=');
-          deviceArg = dVal || 'cpu';
+          deviceArg = dVal || 'gpu';
       }
       let devices = parseList(deviceArg);
 

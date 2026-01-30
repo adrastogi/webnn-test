@@ -288,8 +288,10 @@ async function launchBrowser() {
    ];
 
    if (process.env.EXTRA_BROWSER_ARGS) {
-       const extraArgs = process.env.EXTRA_BROWSER_ARGS.split(' ');
+       // Split by whitespace followed by -- to allow spaces in argument values
+       const extraArgs = process.env.EXTRA_BROWSER_ARGS.split(/\s+(?=--)/);
        extraArgs.forEach(arg => {
+           arg = arg.trim();
            if (arg.startsWith('--enable-features=')) {
                const matchIndex = args.findIndex(a => a.startsWith('--enable-features='));
                if (matchIndex !== -1) {
@@ -298,7 +300,7 @@ async function launchBrowser() {
                } else {
                    args.push(arg);
                }
-           } else if (arg.trim() !== '') {
+           } else if (arg !== '') {
                args.push(arg);
            }
        });

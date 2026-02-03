@@ -487,7 +487,6 @@ class WptRunner extends WebNNRunner {
                             if (row.querySelector('th')) return;
                             
                             const cells = row.querySelectorAll('td');
-                            debug[`row${idx}CellCount`] = cells.length;
                             
                             if (cells.length >= 2) {
                                 const statusCell = cells[0];
@@ -495,7 +494,6 @@ class WptRunner extends WebNNRunner {
                                 const messageCell = cells[2];
                                 
                                 const status = statusCell ? statusCell.textContent.trim().toUpperCase() : '';
-                                debug[`row${idx}Status`] = status;
                                 
                                 if (status === 'FAIL' || status === 'TIMEOUT' || status === 'ERROR' || status === 'NOTRUN') {
                                     // Test name is in the second column

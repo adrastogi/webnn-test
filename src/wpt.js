@@ -341,7 +341,10 @@ class WptRunner extends WebNNRunner {
         await page.waitForTimeout(2000);
 
         // Parse results with robust logic from original file
-        const resData = await page.evaluate(() => {
+        // Also scrape detailed failure info if verbose mode is enabled
+        const verboseEnabled = process.env.VERBOSE === 'true';
+        
+        const resData = await page.evaluate((scrapeDetails) => {
             const body = document.body.textContent;
             let subcases = { total: 0, passed: 0, failed: 0 };
 
@@ -409,8 +412,123 @@ class WptRunner extends WebNNRunner {
             else if (body.includes('PASS')) { subcases.total=1; subcases.passed=1; resultStatus = 'PASS'; }
             else if (body.includes('FAIL')) { subcases.total=1; subcases.failed=1; resultStatus = 'FAIL'; }
 
-            return { result: resultStatus, subcases };
-        });
+            // Scrape detailed failure info if requested and there are failures
+            let failedSubtests = [];
+            if (scrapeDetails && subcases.failed > 0) {
+                // WPT results structure: #results IS the table element (contains thead/tbody directly)
+                // Don't use '#results table' as that matches nested empty tables in <details>
+                const resultsTable = document.querySelector('#results');
+                
+                if (resultsTable) {
+                    // Query direct child rows from tbody using :scope
+                    const tbody = resultsTable.querySelector('tbody');
+                    const allRows = tbody ? tbody.querySelectorAll(':scope > tr') : resultsTable.querySelectorAll(':scope > tr');
+                    
+                    allRows.forEach(row => {
+                        // Skip header rows
+                        if (row.querySelector('th')) return;
+                        
+                        const cells = row.querySelectorAll('td');
+                        if (cells.length >= 2) {
+                            const statusCell = cells[0];
+                            const nameCell = cells[1];
+                            const messageCell = cells[2];
+                            
+                            const status = statusCell ? statusCell.textContent.trim().toUpperCase() : '';
+                            
+                            if (status === 'FAIL' || status === 'TIMEOUT' || status === 'ERROR' || status === 'NOTRUN') {
+                                // Test name is in the second column
+                                const testName = nameCell ? nameCell.textContent.trim().split('\n')[0].substring(0, 300) : 'Unknown';
+                                
+                                // Message is in the third column
+                                let message = '';
+                                if (messageCell) {
+                                    const clone = messageCell.cloneNode(true);
+                                    const details = clone.querySelector('details');
+                                    if (details) details.remove();
+                                    message = clone.textContent.trim().substring(0, 800);
+                                }
+                                
+                                failedSubtests.push({
+                                    name: testName || 'Unknown subtest',
+                                    status: status,
+                                    message: message
+                                });
+                            }
+                        }
+                    });
+                }
+            }
+
+            return { result: resultStatus, subcases, failedSubtests };
+        }, verboseEnabled);
+
+        // If verbose mode is enabled and there are failures but no details captured, try scraping separately
+        let failedSubtests = resData.failedSubtests || [];
+        if (verboseEnabled && resData.subcases.failed > 0 && failedSubtests.length === 0) {
+            // Wait a bit more for the table to populate
+            await page.waitForTimeout(1000);
+            
+            try {
+                failedSubtests = await page.evaluate(() => {
+                    const failures = [];
+                    
+                    // #results IS the table element (contains thead/tbody directly)
+                    // Don't look for a nested table - that matches the empty table in <details>
+                    const resultsTable = document.querySelector('#results');
+                    
+                    if (resultsTable) {
+                        // Query rows from tbody using :scope to get direct children only
+                        const tbody = resultsTable.querySelector('tbody');
+                        const allRows = tbody ? tbody.querySelectorAll(':scope > tr') : resultsTable.querySelectorAll(':scope > tr');
+                        
+                        allRows.forEach((row) => {
+                            // Skip header rows
+                            if (row.querySelector('th')) return;
+                            
+                            const cells = row.querySelectorAll('td');
+                            
+                            if (cells.length >= 2) {
+                                const statusCell = cells[0];
+                                const nameCell = cells[1];
+                                const messageCell = cells[2];
+                                
+                                const status = statusCell ? statusCell.textContent.trim().toUpperCase() : '';
+                                
+                                if (status === 'FAIL' || status === 'TIMEOUT' || status === 'ERROR' || status === 'NOTRUN') {
+                                    // Test name is in the second column
+                                    const testName = nameCell ? nameCell.textContent.trim().split('\n')[0].substring(0, 300) : 'Unknown';
+                                    
+                                    // Message is in the third column, often starts with assertion text
+                                    let message = '';
+                                    if (messageCell) {
+                                        // Get text before <details> and clean it up
+                                        const clone = messageCell.cloneNode(true);
+                                        const details = clone.querySelector('details');
+                                        if (details) details.remove();
+                                        message = clone.textContent.trim().substring(0, 800);
+                                    }
+                                    
+                                    failures.push({
+                                        name: testName,
+                                        status: status,
+                                        message: message
+                                    });
+                                }
+                            }
+                        });
+                    }
+                    return failures;
+                });
+            } catch (e) {
+                // Scraping failed, continue without details
+            }
+        }
+
+        // Log captured failures
+        if (failedSubtests && failedSubtests.length > 0) {
+            console.log(`[${testName}] Captured ${failedSubtests.length} failed subtest(s) details`);
+        }
 
         console.log(`[${testName}] ${resData.result}: ${resData.subcases.passed} PASS, ${resData.subcases.failed} FAIL`);
 
@@ -420,6 +538,7 @@ class WptRunner extends WebNNRunner {
             suite: 'WPT',
             result: resData.result,
             subcases: resData.subcases,
+            failedSubtests: failedSubtests && failedSubtests.length > 0 ? failedSubtests : undefined,
             executionTime: '0.00'
         };
     };

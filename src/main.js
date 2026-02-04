@@ -40,6 +40,7 @@ Options:
   --pause <case>           Pause execution on failure
   --browser-path <path>    Custom path to browser executable
   --skip-retry             Skip the retry stage for failed tests
+  --verbose                Capture detailed per-subtest failure information
 
 Test Selection:
   --wpt-case <filter>      Run specific WPT test cases
@@ -103,6 +104,7 @@ Examples:
   const configFile = getArg('--config');
   const pauseCase = getArg('--pause');
   const wptRange = getArg('--wpt-range');
+  const verbose = args.includes('--verbose');
 
   // --- Config Generation ---
   let runConfigs = [];
@@ -178,6 +180,7 @@ Examples:
   }
   if (browserPath) process.env.BROWSER_PATH = browserPath;
   if (skipRetry) process.env.SKIP_RETRY = 'true';
+  if (verbose) process.env.VERBOSE = 'true';
 
   delete process.env.TEST_SUITE;
   delete process.env.DEVICE;

@@ -921,6 +921,22 @@ class WebNNRunner {
                       const statusStyle = `color: ${statusColor}; font-weight: bold;`;
                       const baseTdStyle = "border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;";
 
+                      // Generate failed subtests HTML if available
+                      const failedSubtestsHtml = result.failedSubtests && result.failedSubtests.length > 0 ? `
+                                <br><details style="margin-top: 5px;">
+                                    <summary style="cursor: pointer; color: #dc3545; font-size: 12px; font-weight: bold;">View Failed Subtests (${result.failedSubtests.length})</summary>
+                                    <div style="margin-top: 5px; padding: 10px; background-color: #fff5f5; border-radius: 4px; border: 1px solid #f5c6cb; max-height: 400px; overflow-y: auto;">
+                                        ${result.failedSubtests.map((subtest, idx) => `
+                                            <div style="margin: 8px 0; padding: 8px; background-color: #fff; border-left: 3px solid #dc3545; border-radius: 2px;">
+                                                <div style="font-size: 12px; font-weight: bold; color: #24292e; word-break: break-word;">${idx + 1}. ${subtest.name}</div>
+                                                ${subtest.status && subtest.status !== 'FAIL' ? `<div style="font-size: 11px; color: #fd7e14; margin-top: 2px;">Status: ${subtest.status}</div>` : ''}
+                                                ${subtest.message ? `<div style="font-size: 11px; color: #586069; margin-top: 4px; font-family: monospace; white-space: pre-wrap; word-break: break-word; background-color: #f6f8fa; padding: 4px; border-radius: 2px;">${subtest.message}</div>` : ''}
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                </details>
+                                ` : '';
+
                       return `
                         <tr>
                             <td style="${baseTdStyle}"><strong>${(result.device || 'N/A').toUpperCase()}</strong></td>
@@ -930,6 +946,7 @@ class WebNNRunner {
                                 ${result.testUrl ? `<br><small><a href="${result.testUrl}" target="_blank" style="color: #0366d6;">${result.testUrl}</a></small>` : ''}
                                 ${result.details && !result.details.includes('Exception') ? `<br><div style="margin-top:4px; font-size: 0.9em; color: #24292e; background-color: #e6ffed; padding: 5px; border-left: 3px solid #28a745; border-radius: 2px;">${result.details}</div>` : ''}
                                 ${result.fullText && result.hasErrors ? `<br><div style="margin-top:4px; font-size: 0.9em; color: #a00; background-color: #fff0f0; padding: 5px; border-left: 3px solid #a00; border-radius: 2px;">${result.fullText}</div>` : ''}
+                                ${failedSubtestsHtml}
                                 ${result.retryHistory && result.retryHistory.length > 1 ? `
                                 <br><details style="margin-top: 5px;">
                                     <summary style="cursor: pointer; color: #0366d6; font-size: 12px;">View Retry History (${retryCount} attempts)</summary>

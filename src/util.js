@@ -12,6 +12,7 @@ class GpuMemoryTracker {
         this.samples = [];
         this.intervalHandle = null;
         this.stopped = false;
+        this.processExited = false;
         this.psProcess = null;
         this.pendingResolve = null;
         this.outputBuffer = '';
@@ -80,13 +81,27 @@ class GpuMemoryTracker {
         this.gpuPid = gpuPid;
         this.samples = [];
         this.stopped = false;
+        this.processExited = false;
         this.initPersistentShell();
-        // Collect an initial sample immediately, then poll
-        this._collectSampleAsync().then(() => {
-            if (!this.stopped) {
-                this.intervalHandle = setInterval(() => this._collectSampleAsync(), this.pollingIntervalMs);
+
+        // Collect first sample synchronously to guarantee at least one data point,
+        // even if the test fails immediately and stop() is called before async polling resolves.
+        try {
+            const cmd = `powershell -NoProfile -c "(Get-Process -Id ${gpuPid} -EA Stop).PrivateMemorySize64"`;
+            const output = execSync(cmd, { encoding: 'utf8', timeout: 5000 }).trim();
+            const bytes = parseInt(output, 10);
+            if (!isNaN(bytes)) {
+                this.samples.push({ timestamp: Date.now(), commitBytes: bytes });
             }
-        });
+        } catch (e) {
+            // Process may already be gone
+            this.processExited = true;
+        }
+
+        // Continue with async polling for subsequent samples
+        if (!this.stopped && !this.processExited) {
+            this.intervalHandle = setInterval(() => this._collectSampleAsync(), this.pollingIntervalMs);
+        }
     }
 
     async _collectSampleAsync() {
@@ -97,6 +112,7 @@ class GpuMemoryTracker {
             );
             if (result === null || result === 'GONE') {
                 // Process exited
+                this.processExited = true;
                 this.stop();
                 return;
             }
@@ -105,6 +121,7 @@ class GpuMemoryTracker {
                 this.samples.push({ timestamp: Date.now(), commitBytes: bytes });
             }
         } catch (e) {
+            this.processExited = true;
             this.stop();
         }
     }
@@ -140,7 +157,7 @@ class GpuMemoryTracker {
             peakCommitMB: parseFloat(toMB(Math.max(...commits))),
             deltaCommitMB: parseFloat(toMB(commits[commits.length - 1] - commits[0])),
             sampleCount: this.samples.length,
-            memoryIncomplete: false
+            memoryIncomplete: this.processExited
         };
     }
 }

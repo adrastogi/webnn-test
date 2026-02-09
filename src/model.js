@@ -124,6 +124,9 @@ class ModelRunner extends WebNNRunner {
           memoryTracker.start(gpuPid);
       }
 
+      // Snapshot the page reference to detect browser restarts
+      const pageBefore = this.page;
+
       try {
         let browserRestarted = false;
         await this.runTestWithSessionCheck(async () => {
@@ -201,6 +204,20 @@ class ModelRunner extends WebNNRunner {
       // Pause between tests
       if (!this.page.isClosed()) {
          await this.page.waitForTimeout(2000);
+      }
+
+      // If the browser was restarted (page reference changed), re-detect GPU PID
+      if (this.page !== pageBefore) {
+          const oldPid = gpuPid;
+          // Stop any in-flight polling on the dead PID
+          memoryTracker.stop();
+          await new Promise(r => setTimeout(r, 2000)); // Let new GPU process stabilize
+          gpuPid = findGpuPid(processName);
+          if (gpuPid) {
+              console.log(`[GpuMemory] Browser restarted. New GPU process PID: ${gpuPid} (was ${oldPid})`);
+          } else {
+              console.log('[GpuMemory] Browser restarted but could not detect new GPU PID. Memory tracking disabled.');
+          }
       }
 
     }

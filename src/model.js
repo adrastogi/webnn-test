@@ -1,5 +1,5 @@
 
-const { WebNNRunner } = require('./util');
+const { WebNNRunner, GpuMemoryTracker, findGpuPid } = require('./util');
 const { expect } = require('@playwright/test');
 
 class ModelRunner extends WebNNRunner {
@@ -82,6 +82,24 @@ class ModelRunner extends WebNNRunner {
 
     const results = [];
 
+    // --- GPU Memory Tracking Setup ---
+    const processName = (process.env.CHROME_CHANNEL || '').includes('edge') ? 'msedge.exe' : 'chrome.exe';
+    const memoryTracker = new GpuMemoryTracker(1500);
+    let gpuPid = null;
+
+    // Detect GPU PID once for the browser session
+    try {
+        await new Promise(r => setTimeout(r, 2000)); // Let GPU process stabilize
+        gpuPid = findGpuPid(processName);
+        if (gpuPid) {
+            console.log(`[GpuMemory] Detected GPU process PID: ${gpuPid}`);
+        } else {
+            console.log('[GpuMemory] Could not detect GPU process PID. Memory tracking will be skipped.');
+        }
+    } catch (e) {
+        console.log('[GpuMemory] Error detecting GPU PID:', e.message);
+    }
+
     for (const key of testKeys) {
       if (!this.models[key]) {
          console.warn(`[Warning] Unknown model test case: ${key}`);
@@ -99,8 +117,15 @@ class ModelRunner extends WebNNRunner {
       const modelDef = this.models[key];
       const startTime = Date.now();
       let infinityErrorDetected = false;
+      let memoryStats = null;
+
+      // Start memory tracking for this sample
+      if (gpuPid) {
+          memoryTracker.start(gpuPid);
+      }
 
       try {
+        let browserRestarted = false;
         await this.runTestWithSessionCheck(async () => {
              // Setup console listener for infinity checks (common in preview)
              const consoleListener = async (msg) => {
@@ -126,12 +151,6 @@ class ModelRunner extends WebNNRunner {
             error.message = "Found infinity in logits";
         }
 
-        // Check if we already pushed a result (some funcs push result themselves)
-        // If not, push error result
-        // Or if we need to update the last result
-        // Ideally, the runner functions should push results.
-        // If runTestWithSessionCheck throws, it means it wasn't caught inside
-
         console.error(`[Fail] Error running model case ${key}:`, error.message);
 
         // Simple duplicate check based on testName
@@ -151,11 +170,27 @@ class ModelRunner extends WebNNRunner {
         }
       }
 
-      // Add execution time to the last result if it belongs to this test
+      // Stop memory tracking and collect stats
+      if (gpuPid) {
+          memoryStats = memoryTracker.stop();
+          if (memoryStats && memoryStats.sampleCount > 0) {
+              console.log(`[GpuMemory] ${modelDef.name}: Peak Commit=${memoryStats.peakCommitMB} MB, Delta=${memoryStats.deltaCommitMB} MB, Samples=${memoryStats.sampleCount}${memoryStats.memoryIncomplete ? ' (incomplete)' : ''}`);
+          }
+      }
+
+      // Add execution time and memory stats to the last result if it belongs to this test
       if (results.length > 0) {
         const lastRes = results[results.length - 1];
-        if (lastRes.testName === modelDef.name && !lastRes.executionTime) {
-            lastRes.executionTime = ((Date.now() - startTime) / 1000).toFixed(2);
+        if (lastRes.testName === modelDef.name) {
+            if (!lastRes.executionTime) {
+                lastRes.executionTime = ((Date.now() - startTime) / 1000).toFixed(2);
+            }
+            if (memoryStats) {
+                lastRes.peakCommitMB = memoryStats.peakCommitMB;
+                lastRes.deltaCommitMB = memoryStats.deltaCommitMB;
+                lastRes.memorySampleCount = memoryStats.sampleCount;
+                lastRes.memoryIncomplete = memoryStats.memoryIncomplete;
+            }
         }
       }
 
@@ -167,7 +202,11 @@ class ModelRunner extends WebNNRunner {
       if (!this.page.isClosed()) {
          await this.page.waitForTimeout(2000);
       }
+
     }
+
+    // Clean up the persistent PowerShell process
+    memoryTracker.destroy();
 
     return results;
   }

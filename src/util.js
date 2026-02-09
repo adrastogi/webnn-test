@@ -1,9 +1,183 @@
 
-const { execSync } = require('child_process');
+const { execSync, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { chromium } = require('@playwright/test');
+
+class GpuMemoryTracker {
+    constructor(pollingIntervalMs = 1500) {
+        this.pollingIntervalMs = pollingIntervalMs;
+        this.gpuPid = null;
+        this.samples = [];
+        this.intervalHandle = null;
+        this.stopped = false;
+        this.psProcess = null;
+        this.pendingResolve = null;
+        this.outputBuffer = '';
+    }
+
+    /**
+     * Spawn a persistent PowerShell process used for all memory queries.
+     * Call once before the first start().
+     */
+    initPersistentShell() {
+        if (this.psProcess) return;
+        try {
+            this.psProcess = spawn('powershell.exe', ['-NoProfile', '-NoLogo', '-Command', '-'], {
+                stdio: ['pipe', 'pipe', 'pipe'],
+                windowsHide: true
+            });
+            this.psProcess.stdout.setEncoding('utf8');
+            this.psProcess.stderr.setEncoding('utf8');
+            this.psProcess.stdout.on('data', (data) => {
+                this.outputBuffer += data;
+                // Look for our sentinel that marks end of output
+                const sentinel = '---EOM---';
+                const idx = this.outputBuffer.indexOf(sentinel);
+                if (idx !== -1) {
+                    const result = this.outputBuffer.substring(0, idx).trim();
+                    this.outputBuffer = this.outputBuffer.substring(idx + sentinel.length);
+                    if (this.pendingResolve) {
+                        const resolve = this.pendingResolve;
+                        this.pendingResolve = null;
+                        resolve(result);
+                    }
+                }
+            });
+            this.psProcess.on('error', () => { this.psProcess = null; });
+            this.psProcess.on('exit', () => { this.psProcess = null; });
+        } catch (e) {
+            console.log('[GpuMemory] Failed to spawn persistent PowerShell:', e.message);
+            this.psProcess = null;
+        }
+    }
+
+    /**
+     * Send a command to the persistent shell and get the result.
+     * Returns a Promise<string>.
+     */
+    _query(command) {
+        return new Promise((resolve) => {
+            if (!this.psProcess || !this.psProcess.stdin.writable) {
+                resolve(null);
+                return;
+            }
+            this.pendingResolve = resolve;
+            // Write the command followed by a sentinel echo so we know when output ends
+            this.psProcess.stdin.write(`${command}\nWrite-Host '---EOM---'\n`);
+            // Timeout safety — if PS hangs, don't block forever
+            setTimeout(() => {
+                if (this.pendingResolve === resolve) {
+                    this.pendingResolve = null;
+                    resolve(null);
+                }
+            }, 4000);
+        });
+    }
+
+    start(gpuPid) {
+        this.gpuPid = gpuPid;
+        this.samples = [];
+        this.stopped = false;
+        this.initPersistentShell();
+        // Collect an initial sample immediately, then poll
+        this._collectSampleAsync().then(() => {
+            if (!this.stopped) {
+                this.intervalHandle = setInterval(() => this._collectSampleAsync(), this.pollingIntervalMs);
+            }
+        });
+    }
+
+    async _collectSampleAsync() {
+        if (!this.gpuPid || this.stopped) return;
+        try {
+            const result = await this._query(
+                `try { (Get-Process -Id ${this.gpuPid} -EA Stop).PrivateMemorySize64 } catch { Write-Host 'GONE' }`
+            );
+            if (result === null || result === 'GONE') {
+                // Process exited
+                this.stop();
+                return;
+            }
+            const bytes = parseInt(result, 10);
+            if (!isNaN(bytes)) {
+                this.samples.push({ timestamp: Date.now(), commitBytes: bytes });
+            }
+        } catch (e) {
+            this.stop();
+        }
+    }
+
+    stop() {
+        if (this.intervalHandle) {
+            clearInterval(this.intervalHandle);
+            this.intervalHandle = null;
+        }
+        this.stopped = true;
+        return this.getStats();
+    }
+
+    /** Kill the persistent PowerShell process (call when all tracking is done). */
+    destroy() {
+        this.stop();
+        if (this.psProcess) {
+            try {
+                this.psProcess.stdin.end();
+                this.psProcess.kill();
+            } catch (e) { /* ignore */ }
+            this.psProcess = null;
+        }
+    }
+
+    getStats() {
+        if (this.samples.length === 0) {
+            return { peakCommitMB: null, deltaCommitMB: null, sampleCount: 0, memoryIncomplete: true };
+        }
+        const commits = this.samples.map(s => s.commitBytes);
+        const toMB = (bytes) => (bytes / (1024 * 1024)).toFixed(2);
+        return {
+            peakCommitMB: parseFloat(toMB(Math.max(...commits))),
+            deltaCommitMB: parseFloat(toMB(commits[commits.length - 1] - commits[0])),
+            sampleCount: this.samples.length,
+            memoryIncomplete: false
+        };
+    }
+}
+
+function findGpuPid(processName = 'chrome.exe') {
+    try {
+        const cmdFind = `Get-CimInstance Win32_Process -Filter "Name='${processName}'" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress`;
+        const stdout = execSync(cmdFind, { encoding: 'utf8', maxBuffer: 1024 * 1024, shell: 'powershell.exe' }).trim();
+        if (!stdout) return null;
+
+        let processes = [];
+        try {
+            const parsed = JSON.parse(stdout);
+            processes = Array.isArray(parsed) ? parsed : [parsed];
+        } catch (e) { return null; }
+
+        // Priority 1: GPU process with our test flag
+        let gpuProcess = processes.find(p =>
+            p.CommandLine &&
+            p.CommandLine.includes('--type=gpu-process') &&
+            p.CommandLine.includes('--webnn-ort-ignore-ep-blocklist')
+        );
+
+        // Priority 2: Any GPU process
+        if (!gpuProcess) {
+            gpuProcess = processes.find(p =>
+                p.CommandLine &&
+                p.CommandLine.includes('--type=gpu-process')
+            );
+        }
+
+        return gpuProcess ? gpuProcess.ProcessId : null;
+    } catch (e) {
+        console.log('[GpuMemory] Failed to find GPU PID:', e.message);
+        return null;
+    }
+}
 
 
 async function send_email(subject, content, sender = '', to = '') {
@@ -712,7 +886,7 @@ class WebNNRunner {
     });
   }
 
-  generateHtmlReport(testSuites, testCase, results, dllCheckResults = null, wallTime = null, sumOfTestTimes = null, baselineDirName = null) {
+  generateHtmlReport(testSuites, testCase, results, dllCheckResults = null, wallTime = null, sumOfTestTimes = null, baselineDirName = null, verbose = false) {
     const totalSubcases = results.reduce((sum, r) => sum + r.subcases.total, 0);
     const passedSubcases = results.reduce((sum, r) => sum + r.subcases.passed, 0);
     const failedSubcases = results.reduce((sum, r) => sum + r.subcases.failed, 0);
@@ -1220,29 +1394,41 @@ class WebNNRunner {
                 ${dllDisplayHtml}
                 ${groupSummaryHtml}
                 ${changesHtml}
-                <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-family: sans-serif;">
+                ${(() => {
+                    const hasMemoryData = groupResults.some(r => r.peakCommitMB != null);
+                    const thStyle = 'border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;';
+                    const thStyleR = 'border: 1px solid #e1e4e8; padding: 8px 12px; text-align: right; background-color: #f6f8fa; font-weight: 600;';
+                    const memThStyle = 'border: 1px solid #e1e4e8; padding: 8px 12px; text-align: right; background-color: #e8eaf6; font-weight: 600; white-space: nowrap;';
+                    return `
+                <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-family: sans-serif; table-layout: auto;">
                     <thead>
                         <tr>
-                            <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Device</th>
-                            <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Suite</th>
-                            <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Case</th>
-                            <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Status</th>
-                            <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Trend</th>
-                            <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Passed Subcases</th>
-                            <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Failed Subcases</th>
-                            <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Total Subcases</th>
-                            <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Success Rate</th>
-                            <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Retries</th>
-                            <th style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; background-color: #f6f8fa; font-weight: 600;">Execution Time</th>
+                            <th style="${thStyle}">Device</th>
+                            <th style="${thStyle}">Suite</th>
+                            <th style="${thStyle}">Case</th>
+                            <th style="${thStyle}">Status</th>
+                            <th style="${thStyle}">Trend</th>
+                            <th style="${thStyleR}">Passed</th>
+                            <th style="${thStyleR}">Failed</th>
+                            <th style="${thStyleR}">Total</th>
+                            <th style="${thStyleR}">Rate</th>
+                            ${hasMemoryData ? `<th style="${memThStyle}">Peak Commit (MB)</th>` : ''}
+                            ${hasMemoryData && verbose ? `<th style="${memThStyle}">Delta (MB)</th><th style="${memThStyle}">Samples</th>` : ''}
+                            <th style="${thStyle}">Retries</th>
+                            <th style="${thStyleR}">Time</th>
                         </tr>
-                    </thead>
+                    </thead>`;
+                })()}
                     <tbody>
-                        ${groupResults.map(result => {
+                        ${(() => { const hasMemoryData = groupResults.some(r => r.peakCommitMB != null); return groupResults.map(result => {
                           const retryCount = result.retryHistory ? result.retryHistory.length - 1 : 0;
                           const retryInfo = retryCount > 0 ? `${retryCount} retry(ies)` : 'No retries';
                           const statusColor = result.result === 'PASS' ? '#28a745' : result.result === 'FAIL' ? '#dc3545' : '#fd7e14';
                           const statusStyle = `color: ${statusColor}; font-weight: bold;`;
-                          const baseTdStyle = "border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;";
+                          const tdBase = "border: 1px solid #e1e4e8; padding: 8px 12px;";
+                          const baseTdStyle = tdBase + " text-align: left;";
+                          const tdRight = tdBase + " text-align: right;";
+                          const tdMem = tdBase + " text-align: right; background-color: #f5f5ff;";
 
                           const prev = result.previousResult;
                           let trendHtml = '';
@@ -1337,23 +1523,27 @@ class WebNNRunner {
                                 </td>
                                 <td style="${baseTdStyle} ${statusStyle}">${result.result}</td>
                                 <td style="${baseTdStyle}">${trendHtml}</td>
-                                <td style="${baseTdStyle} color: #28a745;"><strong>${result.subcases.passed}</strong></td>
-                                <td style="${baseTdStyle} color: #dc3545;"><strong>${result.subcases.failed}</strong></td>
-                                <td style="${baseTdStyle}"><strong>${result.subcases.total}</strong></td>
-                                <td style="${baseTdStyle}"><strong>${result.subcases.total > 0 ? ((result.subcases.passed/result.subcases.total)*100).toFixed(1) : 0}%</strong></td>
+                                <td style="${tdRight} color: #28a745;"><strong>${result.subcases.passed}</strong></td>
+                                <td style="${tdRight} color: #dc3545;"><strong>${result.subcases.failed}</strong></td>
+                                <td style="${tdRight}"><strong>${result.subcases.total}</strong></td>
+                                <td style="${tdRight}"><strong>${result.subcases.total > 0 ? ((result.subcases.passed/result.subcases.total)*100).toFixed(1) : 0}%</strong></td>
+                                ${hasMemoryData ? `<td style="${tdMem}"><strong>${result.peakCommitMB != null ? result.peakCommitMB + (result.memoryIncomplete ? ' ⚠' : '') : '-'}</strong></td>` : ''}
+                                ${hasMemoryData && verbose ? `<td style="${tdMem}">${result.deltaCommitMB != null ? result.deltaCommitMB : '-'}</td><td style="${tdMem}">${result.memorySampleCount != null ? result.memorySampleCount : '-'}</td>` : ''}
                                 <td style="${baseTdStyle} font-size: 12px; color: #586069;">${retryInfo}</td>
-                                <td style="${baseTdStyle}"><strong>${result.executionTime ? result.executionTime + 's' : 'N/A'}</strong></td>
+                                <td style="${tdRight}"><strong>${result.executionTime ? result.executionTime + 's' : 'N/A'}</strong></td>
                             </tr>
                           `;
-                        }).join('')}
+                        }).join(''); })()}
+                        ${(() => { const hasMemoryData = groupResults.some(r => r.peakCommitMB != null); return `
                         <tr style="background-color: #e8f5e9; font-weight: bold;">
                             <td colspan="4" style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;"><strong>TOTAL (${configName})</strong></td>
                             <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;"></td>
-                            <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; color: #28a745;"><strong>${groupResults.reduce((s,r)=>s+r.subcases.passed,0)}</strong></td>
-                            <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left; color: #dc3545;"><strong>${groupResults.reduce((s,r)=>s+r.subcases.failed,0)}</strong></td>
-                            <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;"><strong>${groupResults.reduce((s,r)=>s+r.subcases.total,0)}</strong></td>
-                            <td colspan="3" style="border: 1px solid #e1e4e8; padding: 8px 12px;"></td>
+                            <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: right; color: #28a745;"><strong>${groupResults.reduce((s,r)=>s+r.subcases.passed,0)}</strong></td>
+                            <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: right; color: #dc3545;"><strong>${groupResults.reduce((s,r)=>s+r.subcases.failed,0)}</strong></td>
+                            <td style="border: 1px solid #e1e4e8; padding: 8px 12px; text-align: right;"><strong>${groupResults.reduce((s,r)=>s+r.subcases.total,0)}</strong></td>
+                            <td colspan="${hasMemoryData ? (verbose ? 6 : 4) : 3}" style="border: 1px solid #e1e4e8; padding: 8px 12px;"></td>
                         </tr>
+                        `; })()}
                     </tbody>
                 </table>
             </div>
@@ -1533,4 +1723,4 @@ class WebNNRunner {
   }
 }
 
-module.exports = { WebNNRunner, launchBrowser, get_gpu_info, get_cpu_info, get_npu_info };
+module.exports = { WebNNRunner, launchBrowser, get_gpu_info, get_cpu_info, get_npu_info, GpuMemoryTracker, findGpuPid };

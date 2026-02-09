@@ -75,6 +75,7 @@ Options:
   --browser-path <path>    Custom path to browser executable
   --skip-retry             Skip the retry stage for failed tests
   --baseline <folder>      Baseline folder (timestamp) for comparison
+  --verbose                Show detailed GPU memory metrics in report
 
 Test Selection:
   --wpt-case <filter>      Run specific WPT test cases
@@ -135,6 +136,7 @@ Examples:
   const globalExtraArgs = getArg('--browser-arg');
   const browserPath = getArg('--browser-path');
   const skipRetry = args.includes('--skip-retry');
+  const verbose = args.includes('--verbose');
   const baseline = getArg('--baseline');
   const configFile = getArg('--config');
   const pauseCase = getArg('--pause');
@@ -214,6 +216,7 @@ Examples:
   }
   if (browserPath) process.env.BROWSER_PATH = browserPath;
   if (skipRetry) process.env.SKIP_RETRY = 'true';
+  if (verbose) process.env.VERBOSE = 'true';
   if (baseline) process.env.BASELINE_DIR = baseline;
 
   delete process.env.TEST_SUITE;
@@ -625,7 +628,8 @@ Examples:
                    }
                    // -----------------------------------
 
-                   const report = runner.generateHtmlReport(suiteNames, subtitle, results, allDllResults, wallTime, sumOfTestTimes, baselineDirName);
+                   const verbose = process.env.VERBOSE === 'true';
+                   const report = runner.generateHtmlReport(suiteNames, subtitle, results, allDllResults, wallTime, sumOfTestTimes, baselineDirName, verbose);
 
                    const runDir = process.env.PROJECT_RUN_DIR || path.join(__dirname, '..', 'results');
                    const timestamp = process.env.PROJECT_TIMESTAMP;

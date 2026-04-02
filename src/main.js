@@ -445,7 +445,8 @@ Examples:
                    // Callback to run DLL check after first case execution
                    const onFirstCaseComplete = async () => {
                        if (!currentDllResults) {
-                           const processName = (process.env.CHROME_CHANNEL || '').includes('edge') ? 'msedge.exe' : 'chrome.exe';
+                           const bPath = (process.env.BROWSER_PATH || '').toLowerCase();
+                           const processName = (bPath.includes('msedge') || (process.env.CHROME_CHANNEL || '').includes('edge')) ? 'msedge.exe' : 'chrome.exe';
                            console.log('[Info] First case completed. Checking DLLs...');
                            currentDllResults = await currentRunner.checkOnnxruntimeDlls(processName);
                        }

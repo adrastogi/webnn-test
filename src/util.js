@@ -148,7 +148,7 @@ ${content}
     if (os.platform() === 'win32') {
         try {
             const cmd = 'powershell -c "Get-CimInstance -query \'select * from win32_VideoController\' | Select-Object Name, @{N=\'DriverDate\';E={if($_.DriverDate){([datetime]$_.DriverDate).ToString(\'yyyy/MM/dd\')}}}, DriverVersion, PNPDeviceID, Status | ConvertTo-Json -Compress"';
-            const output = execSync(cmd, { encoding: 'utf8' }).trim();
+            const output = execSync(cmd, { encoding: 'utf8', timeout: 15000 }).trim();
 
             if (output) {
                 let gpus = [];
@@ -225,7 +225,7 @@ ${content}
     try {
         if (os.platform() === 'win32') {
              const cmd = 'powershell -c "Get-CimInstance -ClassName Win32_Processor | Select-Object -ExpandProperty Name"';
-             const cpuName = execSync(cmd, { encoding: 'utf8' }).trim();
+             const cpuName = execSync(cmd, { encoding: 'utf8', timeout: 15000 }).trim();
              return cpuName;
         } else {
              const cpus = os.cpus();
@@ -250,7 +250,7 @@ ${content}
             // Common potential names: "Intel(R) AI Boost", "LNP", "NPU"
             // We use word boundary \bNPU\b to avoid matching "Input" (which contains "npu")
             const cmd = 'powershell -c "Get-CimInstance Win32_PnPSignedDriver | Where-Object { $_.DeviceName -match \'\\\\bNPU\\\\b|AI Boost|Hexagon|Movidius\' } | Sort-Object -Property DriverDate -Descending | Select-Object DeviceName, DriverVersion, DeviceID, @{N=\'DriverDate\';E={if($_.DriverDate){([datetime]$_.DriverDate).ToString(\'yyyy/MM/dd\')}}} | ConvertTo-Json -Compress"';
-            const output = execSync(cmd, { encoding: 'utf8' }).trim();
+            const output = execSync(cmd, { encoding: 'utf8', timeout: 15000 }).trim();
             if (output) {
                 let npu = null;
                 try {
@@ -719,6 +719,7 @@ class WebNNRunner {
     const passed = results.filter(r => r.result === 'PASS').length;
     const failed = results.filter(r => r.result === 'FAIL').length;
     const errors = results.filter(r => r.result === 'ERROR').length;
+    const skipped = results.filter(r => r.result === 'SKIP').length;
 
     // Calculate overall regressions and improvements (case-level and subcase-level)
     const allRegressions = [];
@@ -1133,6 +1134,7 @@ class WebNNRunner {
             const groupPassed = groupResults.filter(r => r.result === 'PASS').length;
             const groupFailed = groupResults.filter(r => r.result === 'FAIL').length;
             const groupErrors = groupResults.filter(r => r.result === 'ERROR').length;
+            const groupSkipped = groupResults.filter(r => r.result === 'SKIP').length;
             const groupTotalSubcases = groupResults.reduce((s,r)=>s+r.subcases.total,0);
             const groupPassedSubcases = groupResults.reduce((s,r)=>s+r.subcases.passed,0);
             const groupFailedSubcases = groupResults.reduce((s,r)=>s+r.subcases.failed,0);
@@ -1180,6 +1182,7 @@ class WebNNRunner {
                  <div style="font-weight: bold; color: #28a745;">Pass: ${groupPassed}</div>
                  <div style="font-weight: bold; color: #dc3545;">Fail: ${groupFailed}</div>
                  ${groupErrors > 0 ? `<div style="font-weight: bold; color: #fd7e14;">Error: ${groupErrors}</div>` : ''}
+                 ${groupSkipped > 0 ? `<div style="font-weight: bold; color: #6c757d;">Skip: ${groupSkipped}</div>` : ''}
                  <div style="width: 1px; background-color: #e1e4e8; margin: 0 5px;"></div>
 
                  ${groupRegressions > 0 ? `<div style="font-weight: bold; color: #dc3545;">Regressions: ${groupRegressions}</div>` : ''}
@@ -1256,7 +1259,7 @@ class WebNNRunner {
                         ${groupResults.map(result => {
                           const retryCount = result.retryHistory ? result.retryHistory.length - 1 : 0;
                           const retryInfo = retryCount > 0 ? `${retryCount} retry(ies)` : 'No retries';
-                          const statusColor = result.result === 'PASS' ? '#28a745' : result.result === 'FAIL' ? '#dc3545' : '#fd7e14';
+                          const statusColor = result.result === 'PASS' ? '#28a745' : result.result === 'FAIL' ? '#dc3545' : result.result === 'SKIP' ? '#6c757d' : '#fd7e14';
                           const statusStyle = `color: ${statusColor}; font-weight: bold;`;
                           const baseTdStyle = "border: 1px solid #e1e4e8; padding: 8px 12px; text-align: left;";
 

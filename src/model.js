@@ -1,5 +1,5 @@
 
-const { WebNNRunner } = require('./util');
+const { WebNNRunner, WebNNPerfCollector } = require('./util');
 const { expect } = require('@playwright/test');
 const path = require('path');
 const fs = require('fs');
@@ -192,7 +192,19 @@ class ModelRunner extends WebNNRunner {
       // Pause between tests and navigate away to release WebNN resources
       if (!this.page.isClosed()) {
          try { await this.page.goto('about:blank', { waitUntil: 'load', timeout: 5000 }); } catch(e) {}
-         await this.page.waitForTimeout(2000);
+         try { await this.page.waitForTimeout(2000); } catch(e) {}
+      } else {
+         // Page/browser crashed during the test — ensure recovery before next test
+         console.log('[Info] Page closed after test, ensuring browser is available for next test...');
+         try { await this.ensurePage(); } catch(e) {
+           console.log('[Warning] Could not recover page, will try restartBrowserAndContext...');
+           try {
+             const instance = await this.restartBrowserAndContext(null);
+             this.page = instance.page;
+           } catch(e2) {
+             console.error(`[Error] Browser recovery failed: ${e2.message}`);
+           }
+         }
       }
     }
 
@@ -610,9 +622,13 @@ class ModelRunner extends WebNNRunner {
     const baseUrl = modelDef.url.split('?')[0];
     const testUrl = `${baseUrl}?provider=webnn&devicetype=${device}&model=resnet-50&run=5`;
 
+    const perfCollector = new WebNNPerfCollector();
+
     try {
       console.log(`Running preview test: ${testName} on ${device}`);
       console.log(`Navigating to: ${testUrl}`);
+
+      perfCollector.start(this.page);
 
       await this.page.goto(testUrl);
       await this.page.waitForLoadState('networkidle');
@@ -681,16 +697,22 @@ class ModelRunner extends WebNNRunner {
       if (!latencyFound) throw new Error(`latency element not found after ${maxChecks} attempts`);
       if (!latencyValue.includes('ms')) latencyValue += ' ms';
 
+      const perfSummary = perfCollector.toCompactString();
+      if (perfSummary) console.log(`[WebNN:Perf] IC metrics: ${perfSummary}`);
+
       results.push({
         testName: testName,
         testUrl: testUrl,
         result: 'PASS',
         details: `Latency: ${latencyValue}`,
+        perfMetrics: perfCollector.getSummary(),
+        perfSummary: perfSummary,
         subcases: { total: 1, passed: 1, failed: 0 },
         suite: 'model'
       });
 
     } catch (error) { throw error; }
+    finally { perfCollector.stop(); }
   }
 
   async runModelSdxl(results, modelDef) {
@@ -704,7 +726,11 @@ class ModelRunner extends WebNNRunner {
     console.log(`Running preview test: ${testName} on ${device}`);
     console.log(`Navigating to: ${testUrl}`);
 
+    const perfCollector = new WebNNPerfCollector();
+
     try {
+      perfCollector.start(this.page);
+
       await this.page.goto(testUrl);
       await this.page.waitForLoadState('domcontentloaded');
 
@@ -774,11 +800,16 @@ class ModelRunner extends WebNNRunner {
             throw new Error('Result text did not appear or invalid');
         }
 
+        const perfSummary = perfCollector.toCompactString();
+        if (perfSummary) console.log(`[WebNN:Perf] SDXL metrics: ${perfSummary}`);
+
         results.push({
             testName: testName,
             testUrl: testUrl,
             result: 'PASS',
             details: `Total time: ${resultText}`,
+            perfMetrics: perfCollector.getSummary(),
+            perfSummary: perfSummary,
             subcases: { total: 1, passed: 1, failed: 0 },
             suite: 'model'
         });
@@ -787,6 +818,7 @@ class ModelRunner extends WebNNRunner {
       }
 
     } catch (e) { throw e; }
+    finally { perfCollector.stop(); }
   }
 
   async runModelPhi(results, modelDef) {
@@ -800,7 +832,11 @@ class ModelRunner extends WebNNRunner {
       console.log(`Running preview test: ${testName} on ${device}`);
       console.log(`Navigating to: ${testUrl}`);
 
+      const perfCollector = new WebNNPerfCollector();
+
       try {
+        perfCollector.start(this.page);
+
         await this.page.goto(testUrl);
         await this.page.waitForLoadState('domcontentloaded');
 
@@ -876,11 +912,17 @@ class ModelRunner extends WebNNRunner {
           if (!perfText) throw new Error("No token/sec result found in #performance-indicator");
 
           console.log(`Performance result: ${perfText}`);
+
+          const perfSummary = perfCollector.toCompactString();
+          if (perfSummary) console.log(`[WebNN:Perf] Phi metrics: ${perfSummary}`);
+
           results.push({
             testName: testName,
             testUrl: testUrl,
             result: 'PASS',
             details: `Performance: ${perfText.replace(/\n/g, ', ')}`,
+            perfMetrics: perfCollector.getSummary(),
+            perfSummary: perfSummary,
             subcases: { total: 1, passed: 1, failed: 0 },
             suite: 'model'
           });
@@ -890,6 +932,7 @@ class ModelRunner extends WebNNRunner {
         }
 
       } catch (e) { throw e; }
+      finally { perfCollector.stop(); }
   }
 
   async runModelSam(results, modelDef) {
@@ -903,7 +946,11 @@ class ModelRunner extends WebNNRunner {
     console.log(`Running preview test: ${testName} on ${device}`);
     console.log(`Navigating to: ${testUrl}`);
 
+    const perfCollector = new WebNNPerfCollector();
+
     try {
+        perfCollector.start(this.page);
+
         await this.page.goto(testUrl);
         await this.page.waitForLoadState('domcontentloaded');
 
@@ -960,11 +1007,16 @@ class ModelRunner extends WebNNRunner {
             if (loadError) throw new Error(`Inference failed: ${loadError}`);
             if (!latText) throw new Error("Latency not displayed in #decoder_latency");
 
+            const perfSummary = perfCollector.toCompactString();
+            if (perfSummary) console.log(`[WebNN:Perf] SAM metrics: ${perfSummary}`);
+
             results.push({
                 testName: testName,
                 testUrl: testUrl,
                 result: 'PASS',
                 details: `Latency: ${latText}`,
+                perfMetrics: perfCollector.getSummary(),
+                perfSummary: perfSummary,
                 subcases: { total: 1, passed: 1, failed: 0 },
                 suite: 'model'
             });
@@ -973,6 +1025,7 @@ class ModelRunner extends WebNNRunner {
         }
 
     } catch(e) { throw e; }
+    finally { perfCollector.stop(); }
   }
 
   async runModelWhisper(results, modelDef) {
@@ -986,7 +1039,11 @@ class ModelRunner extends WebNNRunner {
       console.log(`Running preview test: ${testName} on ${device}`);
       console.log(`Navigating to: ${testUrl}`);
 
+      const perfCollector = new WebNNPerfCollector();
+
       try {
+          perfCollector.start(this.page);
+
           await this.page.goto(testUrl);
           await this.page.waitForLoadState('domcontentloaded');
 
@@ -1020,12 +1077,25 @@ class ModelRunner extends WebNNRunner {
 
           console.log("Waiting for model to load (#file-upload to become enabled)...");
           await fileUpload.waitFor({ state: 'attached', timeout: 300000 });
-          // Poll for the input to become enabled
+          // Poll for the input to become enabled.
+          // Use a per-call timeout on isDisabled() to prevent hanging when the
+          // page's JS event loop is blocked by a long ORT session compilation.
           let modelReady = false;
           for (let i = 0; i < 600; i++) { // up to 5 min
             if (loadError) throw new Error(`Model load failed: ${loadError}`);
-            const isDisabled = await fileUpload.isDisabled();
-            if (!isDisabled) { modelReady = true; break; }
+            try {
+              const isDisabled = await Promise.race([
+                fileUpload.isDisabled(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('isDisabled timeout')), 10000))
+              ]);
+              if (!isDisabled) { modelReady = true; break; }
+            } catch (e) {
+              if (e.message === 'isDisabled timeout') {
+                console.log(`[Whisper] Page JS unresponsive (iteration ${i}), ORT session may be compiling...`);
+                continue;
+              }
+              throw e;
+            }
             await this.page.waitForTimeout(500);
           }
           if (loadError) throw new Error(`Model load failed: ${loadError}`);
@@ -1089,11 +1159,16 @@ class ModelRunner extends WebNNRunner {
               console.log(`[Whisper] FAIL: Only ${matchedWords.length}/${expectedWords.length} words matched (need >= ${MIN_WORD_MATCHES})`);
             }
 
+            const perfSummary = perfCollector.toCompactString();
+            if (perfSummary) console.log(`[WebNN:Perf] Whisper metrics: ${perfSummary}`);
+
             results.push({
               testName: testName,
               testUrl: testUrl,
               result: transcriptionOk ? 'PASS' : 'FAIL',
               details: `Transcription: ${transcription || '(blank)'}. ${latencyText}${wordMatchInfo}`,
+              perfMetrics: perfCollector.getSummary(),
+              perfSummary: perfSummary,
               subcases: { total: 1, passed: transcriptionOk ? 1 : 0, failed: transcriptionOk ? 0 : 1 },
               suite: 'model'
             });
@@ -1103,6 +1178,7 @@ class ModelRunner extends WebNNRunner {
           }
 
       } catch(e) { throw e; }
+      finally { perfCollector.stop(); }
   }
 }
 

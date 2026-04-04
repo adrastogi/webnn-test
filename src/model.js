@@ -13,28 +13,24 @@ class ModelRunner extends WebNNRunner {
         name: 'LeNet Digit Recognition',
         url: 'https://webmachinelearning.github.io/webnn-samples/lenet/',
         type: 'sample',
-        devices: ['cpu', 'gpu'],
         func: this.runModelLenet
       },
       'segmentation': {
         name: 'Semantic Segmentation (DeepLab V3 MobileNet V2)',
         url: 'https://webmachinelearning.github.io/webnn-samples/semantic_segmentation/',
         type: 'sample',
-        devices: ['cpu', 'gpu'],
         func: this.runModelSemanticSegmentation
       },
       'style': {
         name: 'Fast Style Transfer',
         url: 'https://webmachinelearning.github.io/webnn-samples/style_transfer/',
         type: 'sample',
-        devices: ['cpu', 'gpu'],
         func: this.runModelStyleTransfer
       },
       'od': {
         name: 'Object Detection (Tiny Yolo V2)',
         url: 'https://webmachinelearning.github.io/webnn-samples/object_detection/',
         type: 'sample',
-        devices: ['cpu', 'gpu', 'npu'],
         func: this.runModelObjectDetection
       },
       // Preview
@@ -969,18 +965,26 @@ class ModelRunner extends WebNNRunner {
         this.page.on('console', errorListener);
 
         try {
-            console.log("Waiting for canvas to become visible (model loading)...");
-            const canvas = this.page.locator('canvas').first();
+            // The canvas starts hidden (class="none") and only becomes visible
+            // after both SAM models (~187MB total) are downloaded and compiled.
+            // Use a generous timeout to account for model loading time.
+            console.log("Waiting for canvas (model loading may take a while)...");
+            const canvas = this.page.locator('#img_canvas');
+            await canvas.waitFor({ state: 'visible', timeout: 300000 });
 
-            // The SAM demo hides the canvas behind a progress placeholder while
-            // downloading and compiling the encoder model (171MB+). On NPU and
-            // depending on platform this can take minutes. Use 600s to match other
-            // preview test timeouts.
-            await canvas.waitFor({ state: 'visible', timeout: 600000 });
-
-            // Wait for model to be ready (loading indicators disappear)
-            await this.page.waitForTimeout(5000);
+            // After canvas is visible, the default image (EgyptianCat.png) is
+            // processed by the encoder via handleImage(). Wait for the cursor
+            // to change from "wait" to "default" indicating the encoder is done.
+            console.log("Waiting for encoder to finish processing default image...");
+            let encoderReady = false;
+            for (let i = 0; i < 600; i++) { // up to 5 min
+                if (loadError) throw new Error(`Model load failed: ${loadError}`);
+                const cursor = await canvas.evaluate(el => el.style.cursor);
+                if (cursor !== 'wait') { encoderReady = true; break; }
+                await this.page.waitForTimeout(500);
+            }
             if (loadError) throw new Error(`Model load failed: ${loadError}`);
+            if (!encoderReady) throw new Error("Encoder did not finish processing the image in time");
 
             console.log("Clicking on canvas to trigger segmentation...");
             const box = await canvas.boundingBox();

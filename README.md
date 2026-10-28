@@ -99,6 +99,7 @@ node src/main.js --suite model
 # Run specific model cases
 node src/main.js --suite model --model-case lenet
 node src/main.js --suite model --model-case sdxl,whisper
+node src/main.js --suite model --model-case stem --device npu
 ```
 
 Available model cases include:
@@ -111,6 +112,27 @@ Available model cases include:
 - `phi`: Phi-3 WebGPU
 - `sam`: Segment Anything
 - `whisper`: Whisper-base WebGPU
+- `stem`: Stem Separator (WebNN GPU or NPU only)
+
+### Adding a sample
+
+Register a case in `ModelRunner.models` in `src/model.js` with its name, URL,
+type (`sample` or `preview`), and runner method. Implement the method in the same
+class: select the requested device explicitly, drive the sample's normal UI,
+verify actual output, and append the standard result object (`testName`,
+`testUrl`, `result`, `details`, `subcases`, `suite: 'model'`). Throw on failure;
+`runModelTests` records the error. For instrumented previews, start a
+`WebNNPerfCollector` before navigation, include `perfMetrics`/`perfSummary` in the
+result, and stop it in `finally`.
+
+The case is automatically included in `--suite model`, `--model-case`, `--list`,
+and reports; no separate Playwright project is needed. Add focused regression
+tests under `tests/` and run them with `node --test tests\*.unit.cjs`.
+
+Stem Separator separates `assets/test.wav` into drums, bass, other, and vocals,
+then validates the downloaded WAVs and checks that the stems add back up to the
+input mix (relative MAE within 10%). It runs only on the requested WebNN device;
+CPU runs are reported as `SKIP` because the sample has no WebNN CPU backend.
 
 ## Parallel Execution
 

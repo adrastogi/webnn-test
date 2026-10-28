@@ -507,10 +507,12 @@ Examples:
                        runRes = await currentRunner.runModelTests(onFirstCaseComplete);
                    }
 
+                   // Skipped cases never load ORT; empty runs still fail runtime verification.
+                   const checkRuntime = runRes.length === 0 || runRes.some(r => r.result !== 'SKIP');
                    // Ensure check ran if for some reason callback wasn't triggered (e.g. 0 tests)
-                   if (!currentDllResults) await onFirstCaseComplete();
+                   if (!currentDllResults && checkRuntime) await onFirstCaseComplete();
 
-                   if (process.env.WEBNN_EXPECTED_SDK_PATH) {
+                   if (process.env.WEBNN_EXPECTED_SDK_PATH && checkRuntime) {
                        verifyWindowsAppSdk(currentDllResults, process.env.WEBNN_EXPECTED_SDK_PATH);
                        console.log(`[SDK] Verified ONNX Runtime loaded from ${process.env.WEBNN_EXPECTED_SDK_PATH}`);
                    }

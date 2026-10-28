@@ -4,6 +4,69 @@ const { expect } = require('@playwright/test');
 const path = require('path');
 const fs = require('fs');
 
+// The page reports sum-of-stems vs mix MAE; normalize by the summed output level.
+const MAX_RELATIVE_STEM_MIX_ERROR = 0.1;
+
+function validateStemWav(buffer, expectedSamples) {
+  if (buffer.length < 44 ||
+      buffer.toString('ascii', 0, 4) !== 'RIFF' ||
+      buffer.toString('ascii', 8, 16) !== 'WAVEfmt ' ||
+      buffer.readUInt32LE(16) !== 16 ||
+      buffer.readUInt16LE(20) !== 3 ||
+      buffer.readUInt16LE(22) !== 2 ||
+      buffer.readUInt32LE(24) !== 44100 ||
+      buffer.readUInt16LE(34) !== 32 ||
+      buffer.toString('ascii', 36, 40) !== 'data') {
+    throw new Error('Expected a 44100 Hz stereo float32 WAV');
+  }
+  const dataBytes = buffer.readUInt32LE(40);
+  if (dataBytes !== expectedSamples * 8 || buffer.length !== 44 + dataBytes ||
+      buffer.readUInt32LE(4) !== buffer.length - 8) {
+    throw new Error('Stem WAV length does not match the input audio');
+  }
+  const samples = new Float32Array(expectedSamples * 2);
+  for (let i = 0; i < samples.length; i++) {
+    const sample = buffer.readFloatLE(44 + i * 4);
+    if (!Number.isFinite(sample)) throw new Error('Stem WAV contains non-finite samples');
+    samples[i] = sample;
+  }
+  return samples;
+}
+
+function parseSampleCount(text) {
+  const match = /^\s*([\d\s.,'\u00a0\u202f]+?)\s*samples\b/.exec(text || '');
+  const value = match ? Number(match[1].replace(/\D/g, '')) : NaN;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`Could not read the sample count from "${text}"`);
+  }
+  return value;
+}
+
+function parseMixError(text) {
+  const match = /sum-of-stems vs mix MAE:\s*(\S+)/.exec(text || '');
+  const value = match ? Number(match[1]) : NaN;
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`Could not read the sum-of-stems vs mix MAE from "${text}"`);
+  }
+  return value;
+}
+
+function checkStemMix(stems, mixError, maxRelativeError = MAX_RELATIVE_STEM_MIX_ERROR) {
+  let level = 0;
+  for (let i = 0; i < stems[0].length; i++) {
+    let sum = 0;
+    for (const stem of stems) sum += stem[i];
+    level += Math.abs(sum);
+  }
+  level /= stems[0].length;
+  if (level === 0) throw new Error('All four separated stems are silent');
+  const relativeError = mixError / level;
+  if (relativeError > maxRelativeError) {
+    throw new Error(`Summed stems do not match the input mix: relative MAE ${relativeError.toFixed(4)} exceeds ${maxRelativeError}`);
+  }
+  return relativeError;
+}
+
 class ModelRunner extends WebNNRunner {
   constructor(page) {
     super(page);
@@ -52,6 +115,12 @@ class ModelRunner extends WebNNRunner {
         type: 'preview',
         func: this.runModelWhisper
       },
+      'stem': {
+        name: 'WebNN Developer Preview Stem Separator',
+        url: 'https://microsoft.github.io/webnn-developer-preview/demos/stem-separator/',
+        type: 'preview',
+        func: this.runModelStemSeparator
+      },
       'sdxl': {
         name: 'WebNN Developer Preview SDXL Turbo',
         url: 'https://microsoft.github.io/webnn-developer-preview/demos/sdxl-turbo/',
@@ -83,6 +152,7 @@ class ModelRunner extends WebNNRunner {
     }
 
     const results = [];
+    let runtimeChecked = false;
 
     for (const key of testKeys) {
       if (!this.models[key]) {
@@ -161,7 +231,9 @@ class ModelRunner extends WebNNRunner {
         }
       }
 
-      if (results.length === 1 && onFirstCaseComplete) {
+      // A skipped case never loads ORT, so inspect modules after the first case that ran.
+      if (!runtimeChecked && results[results.length - 1]?.result !== 'SKIP' && onFirstCaseComplete) {
+          runtimeChecked = true;
           await onFirstCaseComplete();
       }
 
@@ -1012,6 +1084,106 @@ class ModelRunner extends WebNNRunner {
     finally { perfCollector.stop(); }
   }
 
+  async runModelStemSeparator(results, modelDef) {
+    const device = process.env.DEVICE || 'cpu';
+    // The sample has no WebNN CPU option; never substitute WASM or its auto cascade.
+    if (!['gpu', 'npu'].includes(device)) {
+      console.log(`[Skip] Stem Separator has no WebNN ${device.toUpperCase()} backend`);
+      results.push({
+        testName: modelDef.name,
+        testUrl: modelDef.url,
+        result: 'SKIP',
+        details: `No WebNN ${device.toUpperCase()} backend in this sample`,
+        subcases: { total: 0, passed: 0, failed: 0 },
+        suite: 'model'
+      });
+      return;
+    }
+
+    const testUrl = `${modelDef.url.split('?')[0]}?provider=webnn&devicetype=${device}`;
+    const backendLabel = `WebNN ${device.toUpperCase()}`;
+    const perfCollector = new WebNNPerfCollector();
+    const timeout = 300000;
+    const pageError = selector => this.page.evaluate(errorSelector => {
+      const error = document.querySelector(errorSelector)?.textContent.trim();
+      if (!error) return null;
+      const log = (document.querySelector('#log')?.innerText || '').trim().split('\n').slice(-5).join('\n');
+      return log ? `${error}\n${log}` : error;
+    }, selector);
+
+    try {
+      perfCollector.start(this.page);
+      console.log(`Running preview test: ${modelDef.name} on ${device}`);
+      await this.page.goto(testUrl, { waitUntil: 'domcontentloaded' });
+      await expect(this.page.locator('#load-btn')).toBeEnabled({ timeout });
+      await this.page.locator('#backend-select').selectOption(`webnn-${device}`);
+      await this.page.locator('#load-btn').click();
+      await this.page.waitForFunction(() =>
+        document.querySelector('#status')?.textContent.includes('Session loaded with') ||
+        document.querySelector('#status .badge-error'), null, { timeout });
+      const loadError = await pageError('#status .badge-error');
+      if (loadError) throw new Error(`Model load failed: ${loadError}`);
+      await expect(this.page.locator('#status')).toHaveText(`Session loaded with ${backendLabel}`);
+
+      const fileUpload = this.page.locator('#audio-file');
+      await expect(fileUpload).toBeEnabled();
+      await fileUpload.setInputFiles(path.join(__dirname, '..', 'assets', 'test.wav'));
+      await expect(this.page.locator('#infer-btn')).toBeEnabled({ timeout });
+      const expectedSamples = parseSampleCount(await this.page.locator('#audio-info tr')
+        .filter({ hasText: 'Total samples @ 44.1kHz' }).locator('td').textContent());
+
+      await this.page.locator('#infer-btn').click();
+      await this.page.locator('#infer-result .result-ok, #infer-result .badge-error')
+        .waitFor({ state: 'visible', timeout });
+      const inferenceError = await pageError('#infer-result .badge-error');
+      if (inferenceError) throw new Error(`Separation failed: ${inferenceError}`);
+      await expect(this.page.locator('#infer-result .result-ok')).toContainText(backendLabel);
+      await expect(this.page.locator('#stem-grid .track')).toHaveCount(4);
+      await expect(this.page.locator('#download-all-btn')).toBeEnabled();
+
+      const stems = [];
+      for (const stem of ['drums', 'bass', 'other', 'vocals']) {
+        const button = this.page.getByTitle(`Download test.${stem}.wav`, { exact: true });
+        const [download] = await Promise.all([
+          this.page.waitForEvent('download', { timeout: 30000 }),
+          button.click()
+        ]);
+        if (download.suggestedFilename() !== `test.${stem}.wav`) {
+          throw new Error(`Unexpected ${stem} download: ${download.suggestedFilename()}`);
+        }
+        const failure = await download.failure();
+        if (failure) throw new Error(`${stem} download failed: ${failure}`);
+        const buffer = fs.readFileSync(await download.path());
+        stems.push(validateStemWav(buffer, expectedSamples));
+      }
+      const mixError = parseMixError(await this.page.locator('#stem-stats').textContent());
+      const relativeMixError = checkStemMix(stems, mixError);
+      console.log(`[Stem] Sum-of-stems vs mix MAE ${mixError.toExponential(3)}, relative ${relativeMixError.toFixed(4)}`);
+
+      const entries = perfCollector.getEntries();
+      for (const name of ['webnn.session.create', 'webnn.inference']) {
+        if (!entries.some(entry => entry.name === name && !entry.error &&
+            entry.provider === 'webnn' && entry.device === device)) {
+          throw new Error(`Missing successful ${backendLabel} metric: ${name}`);
+        }
+      }
+      const perfSummary = perfCollector.toCompactString();
+      console.log(`[WebNN:Perf] Stem Separator metrics: ${perfSummary}`);
+      results.push({
+        testName: modelDef.name,
+        testUrl,
+        result: 'PASS',
+        details: `${backendLabel}: validated drums, bass, other, vocals (stereo float32 WAV, 44100 Hz, ${expectedSamples} samples); sum-of-stems vs mix MAE ${mixError.toExponential(3)} (relative ${relativeMixError.toFixed(4)}).`,
+        perfMetrics: perfCollector.getSummary(),
+        perfSummary,
+        subcases: { total: 1, passed: 1, failed: 0 },
+        suite: 'model'
+      });
+    } finally {
+      perfCollector.stop();
+    }
+  }
+
   async runModelWhisper(results, modelDef) {
       const testName = modelDef.name;
       const device = process.env.DEVICE || 'cpu';
@@ -1166,4 +1338,4 @@ class ModelRunner extends WebNNRunner {
   }
 }
 
-module.exports = { ModelRunner };
+module.exports = { ModelRunner, validateStemWav, parseSampleCount, parseMixError, checkStemMix };

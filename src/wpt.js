@@ -2,6 +2,24 @@
 const { test } = require('@playwright/test');
 const { WebNNRunner } = require('./util');
 
+const DEFAULT_WPT_BASE_URL = 'https://wpt.live';
+const DEFAULT_WPT_TIMEOUT_MS = 60000;
+
+// Accepts a WPT server root (e.g. http://localhost:8000) or a full
+// .../webnn/conformance_tests/ URL and returns the conformance_tests directory URL.
+const getWptConformanceUrl = (baseUrl = process.env.WPT_BASE_URL) => {
+    const root = (baseUrl || DEFAULT_WPT_BASE_URL)
+        .trim()
+        .replace(/\/+$/, '')
+        .replace(/\/webnn\/conformance_tests$/i, '');
+    return `${root}/webnn/conformance_tests/`;
+};
+
+const getWptTimeoutMs = () => {
+    const seconds = Number(process.env.WPT_TIMEOUT);
+    return seconds > 0 ? seconds * 1000 : DEFAULT_WPT_TIMEOUT_MS;
+};
+
 class WptRunner extends WebNNRunner {
   async runWptTests(context, browser, onFirstCaseComplete) {
     // Configuration
@@ -32,15 +50,21 @@ class WptRunner extends WebNNRunner {
 
     console.log(`Running WPT tests. Case: ${wptCase || 'ALL'}, Range: ${rangeFilter || 'ALL'}, Jobs: ${jobs}`);
 
-    const baseWptUrl = 'https://wpt.live/webnn/conformance_tests/';
+    const baseWptUrl = getWptConformanceUrl();
+    console.log(`WPT source: ${baseWptUrl}`);
 
     // 1. Discover Tests
     if (!this.page) {
         throw new Error("WptRunner requires a page in constructor for discovery");
     }
 
-    await this.page.goto(baseWptUrl);
-    await this.page.waitForSelector('.file');
+    const discoveryTimeoutMs = getWptTimeoutMs();
+    await this.page.goto(baseWptUrl, { timeout: discoveryTimeoutMs });
+    try {
+        await this.page.waitForSelector('.file', { timeout: discoveryTimeoutMs });
+    } catch (e) {
+        throw new Error(`No WPT test listing found at ${baseWptUrl} (is it served by 'wpt serve'?): ${e.message}`);
+    }
 
     let testFiles = await this.page.$$eval('.file', elements => {
       return elements
@@ -286,7 +310,8 @@ class WptRunner extends WebNNRunner {
   async runSingleWptTest(page, testFile, index, totalFiles, retryCount = 0) {
     const testFileName = testFile.replace('.js', '.html');
     const device = process.env.DEVICE || 'cpu';
-    const testUrl = `https://wpt.live/webnn/conformance_tests/${testFileName}?device=${device}`;
+    const testUrl = `${getWptConformanceUrl()}${testFileName}?device=${device}`;
+    const timeoutMs = getWptTimeoutMs();
     const testName = testFile.replace('.https.any.js', '').replace('.js', '');
 
     let logPrefix = `Running test`;
@@ -299,7 +324,7 @@ class WptRunner extends WebNNRunner {
     console.log(`${logPrefix}: ${testName}`);
 
     const runTest = async () => {
-        await page.goto(testUrl, { waitUntil: 'networkidle', timeout: 60000 });
+        await page.goto(testUrl, { waitUntil: 'networkidle', timeout: timeoutMs });
 
         // check if encounter gpu context error or harness error
         const crashError = await page.evaluate(() => {
@@ -326,14 +351,14 @@ class WptRunner extends WebNNRunner {
              // Check if .status selector exists first
             const hasStatusSelector = await page.evaluate(() => document.querySelector('.status') !== null);
             if (hasStatusSelector) {
-                await page.waitForSelector('.status', { timeout: 60000 });
+                await page.waitForSelector('.status', { timeout: timeoutMs });
             } else {
                 await page.waitForFunction(() =>
                     document.body.textContent.includes('Pass') ||
                     document.body.textContent.includes('Fail') ||
                     document.body.textContent.includes('Found') ||
                     document.body.textContent.includes('test'),
-                    { timeout: 60000 }
+                    { timeout: timeoutMs }
                 );
             }
         } catch(e) { /* proceed */ }
@@ -544,11 +569,14 @@ class WptRunner extends WebNNRunner {
     };
 
     try {
-        // Enforce 1 minute global timeout for the test case
+        // Enforce a global timeout for the test case (default 60s, see --wpt-timeout)
+        let timer;
         return await Promise.race([
             runTest(),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout 60000ms exceeded')), 60000))
-        ]);
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error(`Timeout ${timeoutMs}ms exceeded`)), timeoutMs);
+            })
+        ]).finally(() => clearTimeout(timer));
     } catch (e) {
         // Rethrow critical errors to trigger browser restart in chunkedExec
         if (e.message.includes('Timeout') ||
@@ -571,4 +599,4 @@ class WptRunner extends WebNNRunner {
   }
 }
 
-module.exports = { WptRunner };
+module.exports = { WptRunner, getWptConformanceUrl, getWptTimeoutMs };

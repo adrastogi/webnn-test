@@ -213,6 +213,11 @@ Examples:
           console.error(`Invalid --wpt-base-url value: ${wptBaseUrl}. Expected an http(s) URL.`);
           process.exit(1);
       }
+      // Paths are appended to the URL, so a query string or fragment would swallow them.
+      if (/[?#]/.test(wptBaseUrl)) {
+          console.error(`Invalid --wpt-base-url value: ${wptBaseUrl}. Query strings and fragments are not supported.`);
+          process.exit(1);
+      }
   }
 
   // --- Config Generation ---

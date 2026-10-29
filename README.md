@@ -124,7 +124,7 @@ node src/main.js --suite model --list
 | `segmentation` | Semantic Segmentation (DeepLab V3 MobileNet V2) | cpu, gpu | - |
 | `style` | Fast Style Transfer | cpu, gpu | 9 styles: `starry-night`, `self-portrait`, `bedroom`, ... |
 | `od` | Object Detection | cpu, gpu, npu | `tinyyolov2-fp32` (`tinyyolov2-fp16` on NPU), `ssdmobilenetv1-fp32`/`-fp16` |
-| `ic-sample` | Image Classification | cpu, gpu, npu | `mobilenet-fp32` (`mobilenet-fp16` on NPU), `mobilenet-uint8`, `squeezenet-*`, `resnet50v2-*`, `resnet50v1-fp16`, `efficientnet-fp16` |
+| `ic-sample` | Image Classification | cpu, gpu, npu | `mobilenet-fp32` (`mobilenet-fp16` on NPU), `mobilenet-uint8`, `squeezenet-fp32`, `resnet50v2-*`, `resnet50v1-fp16`, `efficientnet-fp16` |
 | `nsnet2` | Noise Suppression (NSNet2) | cpu, gpu | - |
 | `rnnoise` | Noise Suppression (RNNoise) | cpu, gpu | - |
 | `selfie` | Selfie Segmentation | cpu, gpu, npu | `general-fp16`, `general-fp32`, `landscape-fp16`, `landscape-fp32` |
@@ -168,6 +168,9 @@ What each case verifies, beyond the page reporting timings:
   speech envelope while removing energy.
 - Text (`phi`): a non-degenerate response that answers "What is 2 + 2?" (`qwen2`
   is only checked for a coherent response).
+- Data types (`ic-sample`, `od`, `selfie`): the graph's constants include the
+  selected data type, so a sample that ignores the selection fails instead of
+  silently running another precision.
 - Previews: `[WebNN:Perf]` entries prove sessions and inference ran on WebNN with
   the requested device, so a silent fallback to WASM or WebGPU fails.
 

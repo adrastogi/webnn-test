@@ -274,6 +274,17 @@ function checkTextResponse(response, expectedAnswer = null) {
   return text;
 }
 
+// The graph's constants must include the selected data type; otherwise the sample silently ran
+// another precision (e.g. a float16 selection building float32 weights).
+function checkGraphDataType(constantTypes, expected) {
+  const types = constantTypes || {};
+  const summary = Object.entries(types).map(([type, count]) => `${type} x${count}`).join(', ') || 'none';
+  if (!types[expected]) {
+    throw new Error(`Selected ${expected} but the graph was built from ${summary} constants`);
+  }
+  return summary;
+}
+
 function checkImageStats(stats, name, minStd = 5) {
   if (!stats || !(stats.width > 0 && stats.height > 0)) throw new Error(`${name} is empty`);
   if (!(stats.std >= minStd)) {
@@ -461,6 +472,24 @@ const STYLE_VARIANTS = {
   'wheatfield_with_crows': 'Wheatfield with Crows'
 };
 
+// Counts the data types of the constants (weights) every WebNN graph is built from, so a sample
+// that ignores its data type selection is caught. Handles constant(descriptor, buffer) and the
+// scalar constant(type, value) overload.
+function installGraphCaptureInPage() {
+  window.__webnnConstantTypes = {};
+  if (typeof MLGraphBuilder === 'undefined' || MLGraphBuilder.prototype.__webnnCaptured) return;
+  MLGraphBuilder.prototype.__webnnCaptured = true;
+  const constant = MLGraphBuilder.prototype.constant;
+  MLGraphBuilder.prototype.constant = function (...args) {
+    const first = args[0];
+    const type = typeof first === 'string' ? first : first && (first.dataType || first.type);
+    if (type && window.__webnnConstantTypes) {
+      window.__webnnConstantTypes[type] = (window.__webnnConstantTypes[type] || 0) + 1;
+    }
+    return constant.apply(this, args);
+  };
+}
+
 class ModelRunner extends WebNNRunner {
   constructor(page) {
     super(page);
@@ -517,7 +546,7 @@ class ModelRunner extends WebNNRunner {
           'mobilenet-fp16': { label: 'MobileNet V2 / float16', model: 'mobilenet', dataType: 'float16' },
           'mobilenet-uint8': { label: 'MobileNet V2 / uint8', model: 'mobilenet', dataType: 'uint8', devices: ['cpu', 'gpu'] },
           'squeezenet-fp32': { label: 'SqueezeNet / float32', model: 'squeezenet', dataType: 'float32', devices: ['cpu', 'gpu'] },
-          'squeezenet-fp16': { label: 'SqueezeNet / float16', model: 'squeezenet', dataType: 'float16' },
+          // No squeezenet-fp16: the sample builds SqueezeNet without the selected data type (always float32).
           'resnet50v2-fp32': { label: 'ResNet50 V2 / float32', model: 'resnet50v2', dataType: 'float32', devices: ['cpu', 'gpu'] },
           'resnet50v2-fp16': { label: 'ResNet50 V2 / float16', model: 'resnet50v2', dataType: 'float16' },
           'resnet50v1-fp16': { label: 'ResNet50 V1 / float16', model: 'resnet50v1', dataType: 'float16' },
@@ -888,6 +917,15 @@ class ModelRunner extends WebNNRunner {
     await this.page.evaluate(installCanvasCaptureInPage);
   }
 
+  async installGraphCapture() {
+    await this.page.evaluate(installGraphCaptureInPage);
+  }
+
+  // Verifies the sample built its graph with the variant's data type; returns a summary for details.
+  async verifyGraphDataType(dataType) {
+    return checkGraphDataType(await this.page.evaluate(() => window.__webnnConstantTypes), dataType);
+  }
+
   async readCanvasCalls() {
     return this.page.evaluate(() => window.__webnnCanvasCalls || {});
   }
@@ -1069,17 +1107,19 @@ class ModelRunner extends WebNNRunner {
     if (await this.skipIfUnavailable(results, caseDef, variant.model, `${variant.label} for this device's layout`)) return;
 
     await this.installCanvasCapture();
+    await this.installGraphCapture();
     await this.resetSampleResult();
     await this.clickSampleOption(variant.model);
     const times = await this.waitForSampleResult();
     await this.page.waitForTimeout(500);
+    const constants = await this.verifyGraphDataType(variant.dataType);
 
     const calls = (await this.readCanvasCalls()).outputCanvas;
     const detections = checkDetections(calls, caseDef.expectedLabel);
     const summary = detections.map(d => `${d.label} ${d.score.toFixed(2)}`).join(', ');
     console.log(`Got detections: ${summary}`);
     results.push(passResult(caseDef, caseDef.url,
-      `Detections: ${summary}. Load: ${times.load}, Build: ${times.build}, Inference: ${times.compute}`));
+      `Detections: ${summary}. Graph constants: ${constants}. Load: ${times.load}, Build: ${times.build}, Inference: ${times.compute}`));
   }
 
   async runSampleImageClassification(results, caseDef, variant) {
@@ -1093,9 +1133,11 @@ class ModelRunner extends WebNNRunner {
     // Models are shown only for the data types and layout the device supports.
     if (await this.skipIfUnavailable(results, caseDef, variant.model, `${variant.label} for this device's layout`)) return;
 
+    await this.installGraphCapture();
     await this.resetSampleResult();
     await this.clickSampleOption(variant.model);
     const times = await this.waitForSampleResult();
+    const constants = await this.verifyGraphDataType(variant.dataType);
     const top = await this.page.evaluate(() => ({
       label: document.getElementById('label0')?.innerText.trim(),
       prob: document.getElementById('prob0')?.innerText.trim()
@@ -1104,7 +1146,7 @@ class ModelRunner extends WebNNRunner {
 
     console.log(`Got top-1: ${top.label} (${top.prob})`);
     results.push(passResult(caseDef, caseDef.url,
-      `Top-1: ${top.label} (${top.prob}). Load: ${times.load}, Build: ${times.build}, Inference: ${times.compute}`));
+      `Top-1: ${top.label} (${top.prob}). Graph constants: ${constants}. Load: ${times.load}, Build: ${times.build}, Inference: ${times.compute}`));
   }
 
   async runSampleDenoiser(results, caseDef) {
@@ -1157,10 +1199,12 @@ class ModelRunner extends WebNNRunner {
     await this.page.waitForTimeout(500);
 
     // Inference starts only once a resolution type is chosen.
+    await this.installGraphCapture();
     await this.resetSampleResult();
     await this.clickSampleOption(variant.resolution);
     const times = await this.waitForSampleResult();
     await this.page.waitForTimeout(1000);
+    const constants = await this.verifyGraphDataType(variant.dataType);
 
     // Swapping the background re-renders the same mask: unchanged pixels are the person.
     const first = await this.screenshot('#outputCanvas');
@@ -1172,7 +1216,7 @@ class ModelRunner extends WebNNRunner {
     const foreground = checkFraction('Foreground', 1 - diff.changed, 0.05, 0.9);
 
     results.push(passResult(caseDef, caseDef.url,
-      `Foreground ${(foreground * 100).toFixed(1)}%. Load: ${times.load}, Build: ${times.build}, Inference: ${times.compute}`));
+      `Foreground ${(foreground * 100).toFixed(1)}%. Graph constants: ${constants}. Load: ${times.load}, Build: ${times.build}, Inference: ${times.compute}`));
   }
 
   async runSampleFacialLandmarks(results, caseDef) {
@@ -1729,6 +1773,7 @@ module.exports = {
   checkFaceLandmarks,
   checkFaceMatches,
   checkImageStats,
+  checkGraphDataType,
   checkTextResponse,
   checkFraction,
   envelopeCorrelation,

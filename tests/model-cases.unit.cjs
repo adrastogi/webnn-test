@@ -10,6 +10,7 @@ const {
     checkFaceLandmarks,
     checkFaceMatches,
     checkImageStats,
+    checkGraphDataType,
     checkTextResponse,
     checkFraction,
     envelopeCorrelation,
@@ -169,6 +170,12 @@ test('face recognition check requires every search face to match a distinct targ
     assert.throws(() => checkFaceMatches(target, { strokeRect: 4, fillText: ['1', '1', '2', '3'] }, 4), /same target/);
     assert.throws(() => checkFaceMatches(target, { strokeRect: 3, fillText: ['1', '2', '3'] }, 4), /detected 4 and 3/);
     assert.throws(() => checkFaceMatches(target, { strokeRect: 4, fillText: ['1', '2', '3', '5'] }, 4), /Not every face/);
+});
+
+test('graph data type check requires constants of the selected type', () => {
+    assert.equal(checkGraphDataType({ float16: 52, int64: 2 }, 'float16'), 'float16 x52, int64 x2');
+    assert.throws(() => checkGraphDataType({ float32: 52 }, 'float16'), /Selected float16 but the graph was built from float32 x52 constants/);
+    assert.throws(() => checkGraphDataType(undefined, 'float32'), /built from none constants/);
 });
 
 test('image and fraction checks reject blank output and out-of-band values', () => {

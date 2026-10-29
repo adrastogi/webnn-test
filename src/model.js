@@ -173,6 +173,8 @@ class ModelRunner extends WebNNRunner {
       let infinityErrorDetected = false;
 
       try {
+        const modelTimeoutSec = Number(process.env.MODEL_TIMEOUT);
+        const watchdog = modelTimeoutSec > 0 ? { timeoutMs: modelTimeoutSec * 1000 } : {};
         await this.runTestWithSessionCheck(async () => {
              // Setup console listener for infinity checks (common in preview)
              const consoleListener = async (msg) => {
@@ -192,7 +194,7 @@ class ModelRunner extends WebNNRunner {
                   this.page.off('console', consoleListener);
                 }
              }
-        });
+        }, true, watchdog);
       } catch (error) {
         if (infinityErrorDetected) {
             error.message = "Found infinity in logits";

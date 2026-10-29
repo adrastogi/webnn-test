@@ -271,6 +271,60 @@ test('mask check accepts a 30% mask blend and measures the masked area', async (
     assert.throws(() => checkMaskOverlay({ changed: 0.98, overlay: 0.001 }), /Segmented mask area 0\.1% is outside/);
 });
 
+test('context tracking counts in-flight createContext calls until they settle', async () => {
+    const { trackContextCreationInPage } = require('../src/model');
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    const previousWindow = global.window;
+    const pending = [];
+    const ml = {
+        createContext(options) {
+            if (options === 'throw') throw new Error('sync');
+            return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+        }
+    };
+    Object.defineProperty(globalThis, 'navigator', { value: { ml }, configurable: true, writable: true });
+    global.window = {};
+    try {
+        trackContextCreationInPage();
+        trackContextCreationInPage();
+        const first = navigator.ml.createContext({ deviceType: 'gpu' });
+        const second = navigator.ml.createContext({ deviceType: 'gpu' });
+        assert.equal(window.__webnnPendingContexts, 2);
+        assert.throws(() => navigator.ml.createContext('throw'), /sync/);
+        assert.equal(window.__webnnPendingContexts, 2);
+        pending[0].resolve('ctx');
+        assert.equal(await first, 'ctx');
+        assert.equal(window.__webnnPendingContexts, 1);
+        pending[1].reject(new Error('no npu'));
+        await assert.rejects(second, /no npu/);
+        assert.equal(window.__webnnPendingContexts, 0);
+    } finally {
+        if (original) Object.defineProperty(globalThis, 'navigator', original);
+        else delete globalThis.navigator;
+        global.window = previousWindow;
+    }
+});
+
+test('sample idle wait requires no pending contexts and stable controls', async () => {
+    const states = [
+        { pending: 1, controls: 'cpu:1' },
+        { pending: 1, controls: 'cpu:1' },
+        { pending: 0, controls: 'gpu:1,float32:1' },
+        { pending: 0, controls: 'gpu:1,float16:1' }
+    ];
+    let reads = 0;
+    const page = {
+        evaluate: async () => states[Math.min(reads++, states.length - 1)],
+        waitForTimeout: ms => new Promise(resolve => setTimeout(resolve, ms))
+    };
+    const runner = new ModelRunner(page);
+    await runner.waitForSampleIdle({ timeout: 2000, quietMs: 30, interval: 5 });
+    assert.ok(reads > states.length, 'waits until the last state has been stable for quietMs');
+
+    const busy = new ModelRunner({ evaluate: async () => ({ pending: 1, controls: 'x' }), waitForTimeout: page.waitForTimeout });
+    await assert.rejects(busy.waitForSampleIdle({ timeout: 60, quietMs: 10, interval: 5 }), /did not settle within 0\.06s \(1 context creations pending\)/);
+});
+
 test('image and fraction checks reject blank output and out-of-band values', () => {
     assert.ok(checkImageStats({ width: 10, height: 10, std: 40 }, 'Image'));
     assert.throws(() => checkImageStats({ width: 10, height: 10, std: 0.5 }, 'Image'), /looks blank/);

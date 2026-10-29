@@ -475,6 +475,39 @@ async function analyzeDenoiseInPage() {
   };
 }
 
+// Counts in-flight navigator.ml.createContext() calls (installed as an init script so calls made
+// while the page loads are seen), letting the harness wait for a sample's asynchronous device
+// handlers, such as preferred-layout queries, to finish.
+function trackContextCreationInPage() {
+  if (typeof navigator === 'undefined' || !navigator.ml || navigator.ml.__webnnTracked) return;
+  navigator.ml.__webnnTracked = true;
+  window.__webnnPendingContexts = 0;
+  const create = navigator.ml.createContext;
+  navigator.ml.createContext = function (...args) {
+    window.__webnnPendingContexts++;
+    let result;
+    try {
+      result = create.apply(this, args);
+    } catch (e) {
+      window.__webnnPendingContexts--;
+      throw e;
+    }
+    return Promise.resolve(result).finally(() => { window.__webnnPendingContexts--; });
+  };
+}
+
+// Pending context creations plus a fingerprint of the sample's selection controls.
+function readSampleStateInPage() {
+  const selector = '#deviceTypeBtns input, #backendBtns input, #dataTypeBtns input, #modelBtns input, ' +
+    '#resolutionType input, #fdModelBtns input';
+  const controls = [...document.querySelectorAll(selector)].map(input => {
+    const label = input.closest('label') || input;
+    const disabled = input.disabled || label.classList.contains('disabled') || label.hasAttribute('disabled');
+    return `${input.id}:${input.checked ? 1 : 0}${disabled ? 'd' : ''}${label.offsetParent ? 'v' : 'h'}`;
+  }).join(',');
+  return { pending: window.__webnnPendingContexts || 0, controls };
+}
+
 // Records 2D canvas annotations per canvas id. A drawImage starts a new frame, so only the
 // latest frame's boxes, labels, and keypoints are kept. Calls with non-finite geometry (which
 // canvas silently ignores) are counted as `invalid` instead of as drawn.
@@ -878,10 +911,37 @@ class ModelRunner extends WebNNRunner {
   // --- Shared helpers ---
 
   async openSample(url) {
+    await this.ensureContextTracking();
     console.log(`Navigating to: ${url}`);
     await this.page.goto(url, { waitUntil: 'networkidle', timeout: 2 * MINUTE });
-    // Samples select a default backend on load; let that settle before overriding it.
-    await this.page.waitForTimeout(1500);
+    // Samples select a default device on load; let that initialization settle before overriding it.
+    await this.waitForSampleIdle();
+  }
+
+  async ensureContextTracking() {
+    this.trackedPages = this.trackedPages || new WeakSet();
+    if (this.trackedPages.has(this.page)) return;
+    await this.page.addInitScript(trackContextCreationInPage);
+    this.trackedPages.add(this.page);
+  }
+
+  // Waits until no WebNN context creation is pending and the sample's selection controls have not
+  // changed for quietMs, so asynchronous device handlers cannot override later selections.
+  async waitForSampleIdle({ timeout = MINUTE, quietMs = 500, interval = 100 } = {}) {
+    const deadline = Date.now() + timeout;
+    let last = null;
+    let stableSince = Date.now();
+    while (Date.now() < deadline) {
+      const state = await this.page.evaluate(readSampleStateInPage);
+      if (last === null || state.controls !== last.controls || state.pending !== last.pending) {
+        last = state;
+        stableSince = Date.now();
+      } else if (state.pending === 0 && Date.now() - stableSince >= quietMs) {
+        return;
+      }
+      await this.page.waitForTimeout(interval);
+    }
+    throw new Error(`Sample controls did not settle within ${timeout / 1000}s (${last && last.pending} context creations pending)`);
   }
 
   // Radio options are hidden inputs inside Bootstrap toggle labels.
@@ -921,7 +981,16 @@ class ModelRunner extends WebNNRunner {
       throw new Error(`The sample does not offer WebNN ${device.toUpperCase()} (#${id})`);
     }
     await this.clickSampleOption(id);
-    await this.page.waitForTimeout(1000);
+    await this.waitForSampleIdle();
+  }
+
+  // Selects a data type once the device handler has settled, and waits for the UI to apply it.
+  async selectSampleDataType(dataType) {
+    await this.clickSampleOption(dataType);
+    await this.waitForSampleIdle();
+    if (!(await this.page.evaluate(id => document.getElementById(id)?.checked, dataType))) {
+      throw new Error(`The sample did not keep the ${dataType} selection`);
+    }
   }
 
   async resetSampleResult() {
@@ -1148,8 +1217,7 @@ class ModelRunner extends WebNNRunner {
     await this.openSample(caseDef.url);
     await this.selectSampleDevice('type', device);
     if (await this.skipIfUnavailable(results, caseDef, variant.dataType, `${variant.dataType} on WebNN ${device.toUpperCase()}`)) return;
-    await this.clickSampleOption(variant.dataType);
-    await this.page.waitForTimeout(500);
+    await this.selectSampleDataType(variant.dataType);
     if (await this.skipIfUnavailable(results, caseDef, variant.model, `${variant.label} for this device's layout`)) return;
 
     await this.installCanvasCapture();
@@ -1174,8 +1242,7 @@ class ModelRunner extends WebNNRunner {
     await this.openSample(caseDef.url);
     await this.selectSampleDevice('type', device);
     if (await this.skipIfUnavailable(results, caseDef, variant.dataType, `${variant.dataType} on WebNN ${device.toUpperCase()}`)) return;
-    await this.clickSampleOption(variant.dataType);
-    await this.page.waitForTimeout(500);
+    await this.selectSampleDataType(variant.dataType);
     // Models are shown only for the data types and layout the device supports.
     if (await this.skipIfUnavailable(results, caseDef, variant.model, `${variant.label} for this device's layout`)) return;
 
@@ -1207,14 +1274,28 @@ class ModelRunner extends WebNNRunner {
     await this.openSample(caseDef.url);
     if (runtimeReady) await runtimeReady;
 
-    await this.selectSampleDevice('backend', device);
-    const ready = await (await this.page.waitForFunction(alertSelector => {
-      const alert = document.querySelector(alertSelector);
-      if (alert) return { error: alert.innerText.trim() };
-      const info = document.getElementById('info')?.innerText || '';
-      return /is ready/i.test(info) ? { info } : null;
-    }, SAMPLE_ALERT, { timeout: 3 * MINUTE, polling: 250 })).jsonValue();
-    if (ready.error) throw new Error(`Sample error: ${ready.error}`);
+    const waitForModelReady = async () => {
+      const ready = await (await this.page.waitForFunction(alertSelector => {
+        const alert = document.querySelector(alertSelector);
+        if (alert) return { error: alert.innerText.trim() };
+        const info = document.getElementById('info')?.innerText || '';
+        return /is ready/i.test(info) ? { info } : null;
+      }, SAMPLE_ALERT, { timeout: 3 * MINUTE, polling: 250 })).jsonValue();
+      if (ready.error) throw new Error(`Sample error: ${ready.error}`);
+    };
+    // The page may auto-select WebNN CPU on load and build that model; let it finish first so its
+    // "ready" status cannot be mistaken for the requested backend's.
+    const backendId = `webnn_${device}`;
+    const selected = await this.page.evaluate(() => document.querySelector('#backendBtns input:checked')?.id || null);
+    if (selected) await waitForModelReady();
+    if (selected !== backendId) {
+      await this.page.evaluate(() => {
+        const info = document.getElementById('info');
+        if (info) info.innerHTML = '';
+      });
+      await this.selectSampleDevice('backend', device);
+      await waitForModelReady();
+    }
 
     await this.page.locator('#choose-audio').click();
     await this.page.locator(`[id="${caseDef.audioId}"]`).click();
@@ -1241,8 +1322,7 @@ class ModelRunner extends WebNNRunner {
     await this.openSample(caseDef.url);
     await this.selectSampleDevice('type', device);
     if (await this.skipIfUnavailable(results, caseDef, variant.dataType, `${variant.dataType} on WebNN ${device.toUpperCase()}`)) return;
-    await this.clickSampleOption(variant.dataType);
-    await this.page.waitForTimeout(500);
+    await this.selectSampleDataType(variant.dataType);
 
     // Inference starts only once a resolution type is chosen.
     await this.installGraphCapture();
@@ -1820,6 +1900,7 @@ module.exports = {
   checkFaceMatches,
   findRepeatedPhrase,
   installCanvasCaptureInPage,
+  trackContextCreationInPage,
   checkImageStats,
   checkGraphDataType,
   checkTextResponse,

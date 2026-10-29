@@ -12,6 +12,7 @@ const {
     checkImageStats,
     checkGraphDataType,
     checkTextResponse,
+    findRepeatedPhrase,
     checkFraction,
     envelopeCorrelation,
     checkDenoisedAudio,
@@ -141,9 +142,17 @@ test('probability parsing accepts percentages and fractions', () => {
 
 test('top-1 label check matches case-insensitively and validates the probability', () => {
     assert.equal(checkTopLabel('lesser panda, red panda', '99.30%', 'Lesser Panda'), 0.993);
+    assert.equal(checkTopLabel('tiger, Panthera tigris', '0.92', 'tiger'), 0.92);
+    assert.equal(checkTopLabel('3', '100.00%', '3'), 1);
     assert.throws(() => checkTopLabel('tiger cat', '0.9', 'tiger, Panthera'), /Expected top-1 class/);
     assert.throws(() => checkTopLabel('tiger', '', 'tiger'), /not in \(0, 1\]/);
     assert.throws(() => checkTopLabel('tiger', '150%', 'tiger'), /not in \(0, 1\]/);
+});
+
+test('top-1 label check requires a whole ImageNet alias, not a substring', () => {
+    assert.throws(() => checkTopLabel('tiger cat', '0.9', 'tiger'), /Expected top-1 class "tiger" but got "tiger cat"/);
+    assert.throws(() => checkTopLabel('giant panda, panda, panda bear', '0.9', 'lesser panda'), /Expected top-1 class/);
+    assert.throws(() => checkTopLabel('13', '0.9', '3'), /Expected top-1 class/);
 });
 
 test('detection check requires labelled boxes including the expected class', () => {
@@ -161,6 +170,43 @@ test('face landmark check requires the expected faces with 68 points each', () =
     assert.throws(() => checkFaceLandmarks({ strokeRect: 1, arc: 68 }, 2), /Expected 2 faces/);
     assert.throws(() => checkFaceLandmarks({ strokeRect: 2, arc: 100 }, 2), /Expected 136 landmarks/);
     assert.throws(() => checkFaceLandmarks(undefined, 2), /detected 0/);
+});
+
+test('canvas checks reject geometry that was not drawn because it was non-finite', () => {
+    assert.throws(() => checkFaceLandmarks({ strokeRect: 2, arc: 0, invalid: 136 }, 2), /136 face boxes or landmarks had non-finite coordinates/);
+    assert.throws(() => checkDetections({ strokeRect: 1, fillText: ['person: 0.9'], invalid: 1 }, 'person'), /non-finite/);
+    const target = { strokeRect: 4, fillText: ['1', '2', '3', '4'] };
+    assert.throws(() => checkFaceMatches(target, { strokeRect: 4, fillText: ['4', '3', '2', '1'], invalid: 1 }, 4), /search face boxes or labels had non-finite/);
+});
+
+test('canvas capture counts non-finite draws as invalid instead of drawn', () => {
+    const { installCanvasCaptureInPage } = require('../src/model');
+    const calls = [];
+    class Context {
+        constructor(id) { this.canvas = { id }; }
+        drawImage() {}
+        strokeRect(...args) { calls.push(['strokeRect', ...args]); }
+        arc(...args) { calls.push(['arc', ...args]); }
+        fillText(...args) { calls.push(['fillText', ...args]); }
+    }
+    const previous = { window: global.window, CanvasRenderingContext2D: global.CanvasRenderingContext2D };
+    global.window = {};
+    global.CanvasRenderingContext2D = Context;
+    try {
+        installCanvasCaptureInPage();
+        const ctx = new Context('out');
+        ctx.arc(1, 2, 2, 0, 2 * Math.PI);
+        ctx.arc(NaN, 2, 2, 0, 2 * Math.PI);
+        ctx.strokeRect(0, 0, Infinity, 5);
+        ctx.strokeRect(0, 0, 5, 5);
+        ctx.fillText('person: 0.9', 1, 2);
+        ctx.fillText('kite: 0.5', NaN, 2);
+        assert.deepEqual(global.window.__webnnCanvasCalls.out, { strokeRect: 1, arc: 1, fillText: ['person: 0.9'], invalid: 3 });
+        assert.equal(calls.length, 6, 'original drawing calls still run');
+    } finally {
+        global.window = previous.window;
+        global.CanvasRenderingContext2D = previous.CanvasRenderingContext2D;
+    }
 });
 
 test('face recognition check requires every search face to match a distinct target', () => {
@@ -215,6 +261,14 @@ test('text response check rejects empty, degenerate, and wrong answers', () => {
     assert.throws(() => checkTextResponse('!!!!!!!!!!!!!!!!!!!!'), /degenerate output/);
     assert.throws(() => checkTextResponse('David decant storeakk Bal-In108btbtbtbtbtbtbtbtbtbt', /4/), /degenerate output \("btbtbtbtbtbtbtbt/);
     assert.throws(() => checkTextResponse('2 + 2 is 2 + 2.', /\b4\b/), /Expected an answer matching/);
+});
+
+test('text response check rejects repeated words and phrases', () => {
+    assert.throws(() => checkTextResponse('four '.repeat(20), /\b4\b|\bfour\b/i), /repeats "four"/);
+    assert.throws(() => checkTextResponse('The answer is 4. '.repeat(6), /\b4\b/), /repeats "the answer is 4"/);
+    assert.equal(findRepeatedPhrase('2 + 2 = 4. Two plus two equals four, so the answer is 4.'), null);
+    assert.equal(findRepeatedPhrase('yes yes yes yes yes'), null);
+    assert.equal(findRepeatedPhrase('ok go ok go ok go ok go ok go ok go'), 'ok go');
 });
 
 test('WebNN perf check requires successful entries on the requested provider and device', () => {

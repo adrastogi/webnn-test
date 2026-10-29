@@ -196,9 +196,12 @@ function parseProbability(text) {
   return match[2] ? value / 100 : value;
 }
 
+// ImageNet labels list comma-separated aliases ("tiger, Panthera tigris"); one alias must equal the
+// expected class, so "tiger cat" does not satisfy "tiger".
 function checkTopLabel(label, probability, expected) {
   const text = (label || '').trim();
-  if (!text.toLowerCase().includes(expected.toLowerCase())) {
+  const aliases = text.toLowerCase().split(',').map(alias => alias.trim()).filter(Boolean);
+  if (!aliases.includes(expected.trim().toLowerCase())) {
     throw new Error(`Expected top-1 class "${expected}" but got "${text || '(empty)'}"`);
   }
   const value = parseProbability(probability);
@@ -217,7 +220,14 @@ function parseDetections(texts) {
   });
 }
 
+// Canvas ignores non-finite coordinates, so such draws are counted separately and fail the case.
+function checkFiniteGeometry(calls, what) {
+  const invalid = (calls && calls.invalid) || 0;
+  if (invalid > 0) throw new Error(`${invalid} ${what} had non-finite coordinates and were not drawn`);
+}
+
 function checkDetections(calls, expectedLabel) {
+  checkFiniteGeometry(calls, 'detection boxes or labels');
   const boxes = (calls && calls.strokeRect) || 0;
   const detections = parseDetections((calls && calls.fillText) || []);
   if (boxes < 1) throw new Error('No objects were detected');
@@ -233,6 +243,7 @@ function checkDetections(calls, expectedLabel) {
 }
 
 function checkFaceLandmarks(calls, expectedFaces, pointsPerFace = 68) {
+  checkFiniteGeometry(calls, 'face boxes or landmarks');
   const faces = (calls && calls.strokeRect) || 0;
   const points = (calls && calls.arc) || 0;
   if (faces !== expectedFaces) throw new Error(`Expected ${expectedFaces} faces, detected ${faces}`);
@@ -244,6 +255,8 @@ function checkFaceLandmarks(calls, expectedFaces, pointsPerFace = 68) {
 
 // Search faces are labelled with the 1-based index of the matching target face, or "X".
 function checkFaceMatches(target, search, expectedFaces) {
+  checkFiniteGeometry(target, 'target face boxes or labels');
+  checkFiniteGeometry(search, 'search face boxes or labels');
   const targetFaces = (target && target.strokeRect) || 0;
   const searchFaces = (search && search.strokeRect) || 0;
   const labels = (search && search.fillText) || [];
@@ -261,13 +274,32 @@ function checkFaceMatches(target, search, expectedFaces) {
   return matches;
 }
 
-// LLM responses must be non-empty, not degenerate (e.g. "!!!!" or "btbtbt" loops), and, when
-// expectedAnswer is given, contain it.
+// The first word sequence (1-4 words) that repeats back-to-back at least minRepeats times, or null.
+function findRepeatedPhrase(text, maxWords = 4, minRepeats = 6) {
+  const words = (text || '').toLowerCase().match(/[\p{L}\p{N}']+/gu) || [];
+  for (let n = 1; n <= maxWords; n++) {
+    for (let i = 0; i + n * minRepeats <= words.length; i++) {
+      const phrase = words.slice(i, i + n).join(' ');
+      let repeats = 1;
+      while (i + (repeats + 1) * n <= words.length &&
+             words.slice(i + repeats * n, i + (repeats + 1) * n).join(' ') === phrase) {
+        repeats++;
+      }
+      if (repeats >= minRepeats) return phrase;
+    }
+  }
+  return null;
+}
+
+// LLM responses must be non-empty, not degenerate (e.g. "!!!!", "btbtbt", or "four four four"
+// loops), and, when expectedAnswer is given, contain it.
 function checkTextResponse(response, expectedAnswer = null) {
   const text = (response || '').replace(/\s+/g, ' ').trim();
   if (!text) throw new Error('The model returned an empty response');
   const loop = /(.{1,4}?)\1{7,}/.exec(text);
   if (loop) throw new Error(`The model produced degenerate output ("${loop[0].slice(0, 40)}"): ${text.slice(0, 200)}`);
+  const phrase = findRepeatedPhrase(text);
+  if (phrase) throw new Error(`The model produced degenerate output (repeats "${phrase}"): ${text.slice(0, 200)}`);
   if (expectedAnswer && !expectedAnswer.test(text)) {
     throw new Error(`Expected an answer matching ${expectedAnswer}, got: ${text.slice(0, 200)}`);
   }
@@ -435,7 +467,8 @@ async function analyzeDenoiseInPage() {
 }
 
 // Records 2D canvas annotations per canvas id. A drawImage starts a new frame, so only the
-// latest frame's boxes, labels, and keypoints are kept.
+// latest frame's boxes, labels, and keypoints are kept. Calls with non-finite geometry (which
+// canvas silently ignores) are counted as `invalid` instead of as drawn.
 function installCanvasCaptureInPage() {
   window.__webnnCanvasCalls = {};
   const proto = CanvasRenderingContext2D.prototype;
@@ -446,13 +479,17 @@ function installCanvasCaptureInPage() {
     if (this.canvas && this.canvas.id && window.__webnnCanvasCalls) delete window.__webnnCanvasCalls[this.canvas.id];
     return drawImage.apply(this, args);
   };
-  for (const fn of ['strokeRect', 'arc', 'fillText']) {
+  // Numeric arguments that must be finite for the call to draw anything.
+  const geometry = { strokeRect: [0, 1, 2, 3], arc: [0, 1, 2, 3, 4], fillText: [1, 2] };
+  for (const fn of Object.keys(geometry)) {
     const original = proto[fn];
     proto[fn] = function (...args) {
       const id = this.canvas && this.canvas.id;
       if (id && window.__webnnCanvasCalls) {
-        const calls = window.__webnnCanvasCalls[id] = window.__webnnCanvasCalls[id] || { strokeRect: 0, arc: 0, fillText: [] };
-        if (fn === 'fillText') calls.fillText.push(String(args[0]));
+        const calls = window.__webnnCanvasCalls[id] = window.__webnnCanvasCalls[id] ||
+          { strokeRect: 0, arc: 0, fillText: [], invalid: 0 };
+        if (!geometry[fn].every(i => Number.isFinite(Number(args[i])))) calls.invalid++;
+        else if (fn === 'fillText') calls.fillText.push(String(args[0]));
         else calls[fn]++;
       }
       return original.apply(this, args);
@@ -1772,6 +1809,8 @@ module.exports = {
   checkDetections,
   checkFaceLandmarks,
   checkFaceMatches,
+  findRepeatedPhrase,
+  installCanvasCaptureInPage,
   checkImageStats,
   checkGraphDataType,
   checkTextResponse,

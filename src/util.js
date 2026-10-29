@@ -1225,6 +1225,7 @@ class WebNNRunner {
             const argsStr = uniqueConfigValues('browserArgs');
             const wptCaseStr = uniqueConfigValues('wptCase');
             const modelCaseStr = uniqueConfigValues('modelCase');
+            const modelVariantsStr = uniqueConfigValues('modelVariants');
 
             // Derive the signature from the first result (assuming config group maps to one signature)
             // Or if multiple, display primary one
@@ -1331,6 +1332,7 @@ class WebNNRunner {
                     ${argsStr !== 'N/A' ? `<div style="font-weight: bold; color: #24292e;">Browser Args:</div><div style="font-family: monospace; background-color: #fafbfc; padding: 2px 4px; border-radius: 3px;">${argsStr}</div>` : ''}
                     ${wptCaseStr !== 'N/A' ? `<div style="font-weight: bold; color: #24292e;">WPT Case:</div><div>${wptCaseStr}</div>` : ''}
                      ${modelCaseStr !== 'N/A' ? `<div style="font-weight: bold; color: #24292e;">Model Case:</div><div>${modelCaseStr}</div>` : ''}
+                     ${suiteStr.includes('model') && modelVariantsStr !== 'N/A' ? `<div style="font-weight: bold; color: #24292e;">Model Variants:</div><div>${modelVariantsStr}</div>` : ''}
                 </div>
             </div>`;
 

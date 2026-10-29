@@ -1,0 +1,225 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const {
+    ModelRunner,
+    parseModelCaseFilter,
+    expandModelCases,
+    parseProbability,
+    checkTopLabel,
+    checkDetections,
+    checkFaceLandmarks,
+    checkFaceMatches,
+    checkImageStats,
+    checkTextResponse,
+    checkFraction,
+    envelopeCorrelation,
+    checkDenoisedAudio,
+    checkWebNNPerf
+} = require('../src/model');
+
+const models = {
+    plain: { name: 'Plain', url: 'u', type: 'sample', devices: ['cpu', 'gpu'] },
+    multi: {
+        name: 'Multi',
+        url: 'u',
+        type: 'sample',
+        variants: {
+            a: { label: 'A', devices: ['cpu', 'gpu'] },
+            b: { label: 'B' }
+        },
+        defaultVariant: { default: 'a', npu: 'b' }
+    },
+    hidden: { name: 'Hidden', url: 'u', type: 'preview', optIn: true, variants: { x: { label: 'X' } } }
+};
+
+const runnable = items => items.map(i => i.error ? `error:${i.key}` : `${i.key}${i.variantId ? `:${i.variantId}` : ''}${i.skipReason ? ' (skip)' : ''}`);
+
+test('model case filter parses keys and plus-separated variants', () => {
+    assert.equal(parseModelCaseFilter(''), null);
+    assert.deepEqual(parseModelCaseFilter(' OD:TinyYolov2-fp16+ssd , lenet,'), [
+        { key: 'od', variants: ['tinyyolov2-fp16', 'ssd'] },
+        { key: 'lenet', variants: null }
+    ]);
+});
+
+test('default run includes one default variant per non opt-in case', () => {
+    assert.deepEqual(runnable(expandModelCases(models, { device: 'gpu' })), ['plain', 'multi:a']);
+    assert.deepEqual(runnable(expandModelCases(models, { device: 'npu' })), ['plain (skip)', 'multi:b']);
+});
+
+test('variant mode all expands every variant and skips unsupported devices', () => {
+    assert.deepEqual(runnable(expandModelCases(models, { variantMode: 'all', device: 'npu' })),
+        ['plain (skip)', 'multi:a (skip)', 'multi:b']);
+});
+
+test('opt-in cases run only when named', () => {
+    assert.deepEqual(runnable(expandModelCases(models, { filter: 'hidden', device: 'gpu' })), ['hidden:x']);
+    assert.deepEqual(runnable(expandModelCases(models, { filter: 'hidden', variantMode: 'all', device: 'gpu' })), ['hidden:x']);
+});
+
+test('explicit variants override the variant mode; unknown cases and variants are errors', () => {
+    assert.deepEqual(runnable(expandModelCases(models, { filter: 'multi:b', variantMode: 'all', device: 'gpu' })), ['multi:b']);
+    const items = expandModelCases(models, { filter: 'nope,multi:zzz,plain:a', device: 'gpu' });
+    assert.deepEqual(runnable(items), ['error:nope', 'error:multi', 'error:plain']);
+    assert.match(items[0].error, /Unknown test case: nope/);
+    assert.match(items[1].error, /Unknown variant "zzz" for multi\. Available: a, b/);
+});
+
+test('overlapping filters run each case variant once', () => {
+    assert.deepEqual(runnable(expandModelCases(models, { filter: 'multi,multi:a+a+b,plain,plain', device: 'gpu' })),
+        ['multi:a', 'multi:b', 'plain']);
+    assert.deepEqual(runnable(expandModelCases(models, { filter: 'multi,multi:b', variantMode: 'all', device: 'gpu' })),
+        ['multi:a', 'multi:b']);
+});
+
+test('a failing case is reported even after a passing case with the same name', async () => {
+    const previous = { DEVICE: process.env.DEVICE, MODEL_CASE: process.env.MODEL_CASE, MODEL_TIMEOUT: process.env.MODEL_TIMEOUT };
+    process.env.DEVICE = 'gpu';
+    process.env.MODEL_CASE = 'one,two';
+    process.env.MODEL_TIMEOUT = '5';
+    try {
+        const page = { isClosed: () => true, on() {}, off() {}, removeListener() {} };
+        const runner = new ModelRunner(page);
+        const timeouts = [];
+        runner.ensurePage = async () => {};
+        runner.runTestWithSessionCheck = async (fn, restart, options) => { timeouts.push(options.timeoutMs); await fn(); };
+        const pass = (results, caseDef) => { results.push({ testName: caseDef.name, result: 'PASS', subcases: { total: 1, passed: 1, failed: 0 } }); };
+        const fail = async () => { throw new Error('boom'); };
+        runner.models = {
+            one: { name: 'Same', url: 'u', type: 'sample', timeoutMs: 60000, func: pass },
+            two: { name: 'Same', url: 'u', type: 'sample', func: fail }
+        };
+        const results = await runner.runModelTests();
+        assert.deepEqual(results.map(r => r.result), ['PASS', 'ERROR']);
+        assert.match(results[1].fullText, /boom/);
+        assert.ok(results.every(r => r.executionTime !== undefined));
+        assert.deepEqual(timeouts, [5000, 5000]);
+    } finally {
+        for (const [key, value] of Object.entries(previous)) {
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+        }
+    }
+});
+
+test('expanded items carry a per-variant test name and the variant definition', () => {
+    const [item] = expandModelCases(models, { filter: 'multi:b', device: 'cpu' });
+    assert.equal(item.caseDef.name, 'Multi [B]');
+    assert.equal(item.caseDef.variantId, 'b');
+    assert.equal(item.caseDef.variant.label, 'B');
+    assert.equal(item.skipReason, null);
+    assert.match(expandModelCases(models, { filter: 'multi:a', device: 'npu' })[0].skipReason, /No WebNN NPU support in this variant \(supported: cpu, gpu\)/);
+});
+
+test('registered model cases have valid devices and default variants', () => {
+    const runner = new ModelRunner(null);
+    for (const [key, model] of Object.entries(runner.models)) {
+        assert.equal(typeof model.func, 'function', `${key} runner`);
+        for (const device of model.devices) assert.ok(['cpu', 'gpu', 'npu'].includes(device), `${key} device ${device}`);
+        for (const device of ['cpu', 'gpu', 'npu']) {
+            for (const item of expandModelCases(runner.models, { filter: key, device })) {
+                assert.equal(item.error, undefined, `${key} on ${device}: ${item.error}`);
+            }
+            for (const item of expandModelCases(runner.models, { filter: key, variantMode: 'all', device })) {
+                assert.equal(item.error, undefined, `${key} on ${device}: ${item.error}`);
+            }
+        }
+    }
+    const defaultKeys = expandModelCases(runner.models, { device: 'gpu' }).map(i => i.key);
+    for (const key of ['ic-sample', 'nsnet2', 'rnnoise', 'selfie', 'fld', 'fr', 'sd15', 'sdturbo']) {
+        assert.ok(defaultKeys.includes(key), `${key} runs by default`);
+    }
+    assert.ok(!defaultKeys.includes('zimage'), 'zimage is opt-in');
+});
+
+test('probability parsing accepts percentages and fractions', () => {
+    assert.equal(parseProbability('99.22%'), 0.9922);
+    assert.equal(parseProbability('0.650055468'), 0.650055468);
+    assert.ok(Number.isNaN(parseProbability('n/a')));
+});
+
+test('top-1 label check matches case-insensitively and validates the probability', () => {
+    assert.equal(checkTopLabel('lesser panda, red panda', '99.30%', 'Lesser Panda'), 0.993);
+    assert.throws(() => checkTopLabel('tiger cat', '0.9', 'tiger, Panthera'), /Expected top-1 class/);
+    assert.throws(() => checkTopLabel('tiger', '', 'tiger'), /not in \(0, 1\]/);
+    assert.throws(() => checkTopLabel('tiger', '150%', 'tiger'), /not in \(0, 1\]/);
+});
+
+test('detection check requires labelled boxes including the expected class', () => {
+    const calls = { strokeRect: 2, fillText: ['person: 0.96', 'kite: 0.87'] };
+    assert.deepEqual(checkDetections(calls, 'person').map(d => d.label), ['person', 'kite']);
+    assert.throws(() => checkDetections({ strokeRect: 0, fillText: [] }, 'person'), /No objects/);
+    assert.throws(() => checkDetections({ strokeRect: 2, fillText: ['person: 0.9'] }, 'person'), /2 boxes but 1 labels/);
+    assert.throws(() => checkDetections({ strokeRect: 1, fillText: ['dog: 0.9'] }, 'person'), /Expected a "person"/);
+    assert.throws(() => checkDetections({ strokeRect: 1, fillText: ['person: 1.5'] }, 'person'), /out of range/);
+    assert.throws(() => checkDetections({ strokeRect: 1, fillText: ['person'] }, 'person'), /Unexpected detection label/);
+});
+
+test('face landmark check requires the expected faces with 68 points each', () => {
+    assert.deepEqual(checkFaceLandmarks({ strokeRect: 2, arc: 136 }, 2), { faces: 2, points: 136 });
+    assert.throws(() => checkFaceLandmarks({ strokeRect: 1, arc: 68 }, 2), /Expected 2 faces/);
+    assert.throws(() => checkFaceLandmarks({ strokeRect: 2, arc: 100 }, 2), /Expected 136 landmarks/);
+    assert.throws(() => checkFaceLandmarks(undefined, 2), /detected 0/);
+});
+
+test('face recognition check requires every search face to match a distinct target', () => {
+    const target = { strokeRect: 4, fillText: ['1', '2', '3', '4'] };
+    assert.deepEqual(checkFaceMatches(target, { strokeRect: 4, fillText: ['4', '3', '2', '1'] }, 4), [4, 3, 2, 1]);
+    assert.throws(() => checkFaceMatches(target, { strokeRect: 4, fillText: ['4', 'X', '2', '1'] }, 4), /Not every face/);
+    assert.throws(() => checkFaceMatches(target, { strokeRect: 4, fillText: ['1', '1', '2', '3'] }, 4), /same target/);
+    assert.throws(() => checkFaceMatches(target, { strokeRect: 3, fillText: ['1', '2', '3'] }, 4), /detected 4 and 3/);
+    assert.throws(() => checkFaceMatches(target, { strokeRect: 4, fillText: ['1', '2', '3', '5'] }, 4), /Not every face/);
+});
+
+test('image and fraction checks reject blank output and out-of-band values', () => {
+    assert.ok(checkImageStats({ width: 10, height: 10, std: 40 }, 'Image'));
+    assert.throws(() => checkImageStats({ width: 10, height: 10, std: 0.5 }, 'Image'), /looks blank/);
+    assert.throws(() => checkImageStats({ width: 0, height: 10, std: 40 }, 'Image'), /empty/);
+    assert.equal(checkFraction('Foreground', 0.35, 0.05, 0.9), 0.35);
+    assert.throws(() => checkFraction('Foreground', 0.99, 0.05, 0.9), /Foreground 99\.0% is outside 5\.0%-90\.0%/);
+    assert.throws(() => checkFraction('Foreground', NaN, 0.05, 0.9), /outside/);
+});
+
+test('envelope correlation finds a lagged match', () => {
+    const a = Array.from({ length: 20 }, (_, i) => i + 1);
+    assert.ok(envelopeCorrelation(a, a) > 0.999);
+    assert.ok(envelopeCorrelation(a, [0, ...a]) > 0.999);
+    assert.ok(envelopeCorrelation(a, [...a].reverse()) < -0.9);
+});
+
+test('denoised audio must keep duration and speech while removing some energy', () => {
+    const envelope = Array.from({ length: 20 }, (_, i) => (i + 1) / 20);
+    const original = { duration: 16.2, rms: 0.115, nonFinite: 0, envelope };
+    const denoised = { duration: 17, rms: 0.105, nonFinite: 0, envelope: envelope.map(v => v * 0.9) };
+    const { ratio, correlation } = checkDenoisedAudio(original, denoised);
+    assert.ok(ratio > 0.9 && ratio < 0.92);
+    assert.ok(correlation > 0.999);
+    assert.throws(() => checkDenoisedAudio(original, { ...denoised, nonFinite: 3 }), /non-finite/);
+    assert.throws(() => checkDenoisedAudio(original, { ...denoised, duration: 5 }), /duration/);
+    assert.throws(() => checkDenoisedAudio(original, { ...denoised, rms: 0.001 }), /nearly silent/);
+    assert.throws(() => checkDenoisedAudio(original, { ...denoised, rms: 0.115 }), /No noise was removed/);
+    assert.throws(() => checkDenoisedAudio(original, { ...denoised, envelope: [...envelope].reverse() }), /no longer follows/);
+});
+
+test('text response check rejects empty, degenerate, and wrong answers', () => {
+    assert.equal(checkTextResponse('Arr, 2 + 2\n\n= 4, matey!', /\b4\b/), 'Arr, 2 + 2 = 4, matey!');
+    assert.equal(checkTextResponse('2 + 2 is 2 + 2.'), '2 + 2 is 2 + 2.');
+    assert.throws(() => checkTextResponse('  \n '), /empty response/);
+    assert.throws(() => checkTextResponse('!!!!!!!!!!!!!!!!!!!!'), /degenerate output/);
+    assert.throws(() => checkTextResponse('David decant storeakk Bal-In108btbtbtbtbtbtbtbtbtbt', /4/), /degenerate output \("btbtbtbtbtbtbtbt/);
+    assert.throws(() => checkTextResponse('2 + 2 is 2 + 2.', /\b4\b/), /Expected an answer matching/);
+});
+
+test('WebNN perf check requires successful entries on the requested provider and device', () => {
+    const entries = [
+        { name: 'webnn.model.fetch' },
+        { name: 'webnn.session.create', provider: 'webnn', device: 'gpu' },
+        ...Array.from({ length: 25 }, (_, i) => ({ name: 'webnn.inference', model: 'unet', iteration: i, provider: 'webnn', device: 'gpu' }))
+    ];
+    checkWebNNPerf(entries, 'gpu', ['webnn.session.create', { name: 'webnn.inference', model: 'unet', min: 25 }]);
+    assert.throws(() => checkWebNNPerf(entries, 'gpu', [{ name: 'webnn.inference', model: 'unet', min: 26 }]), /x26, got 25/);
+    assert.throws(() => checkWebNNPerf(entries, 'gpu', ['webnn.context.create']), /Missing successful WebNN GPU metric: webnn.context.create/);
+    assert.throws(() => checkWebNNPerf(entries, 'npu', ['webnn.session.create']), /Expected WebNN NPU but webnn.session.create ran on webnn gpu/);
+    assert.throws(() => checkWebNNPerf([{ name: 'webnn.inference', provider: 'wasm', device: 'gpu' }], 'gpu', []), /ran on wasm gpu/);
+    assert.throws(() => checkWebNNPerf([{ name: 'webnn.inference', model: 'unet', error: 'boom', provider: 'webnn', device: 'gpu' }], 'gpu', []), /webnn.inference \(unet\) failed: boom/);
+});

@@ -358,6 +358,7 @@ class WptRunner extends WebNNRunner {
                     document.body.textContent.includes('Fail') ||
                     document.body.textContent.includes('Found') ||
                     document.body.textContent.includes('test'),
+                    null,
                     { timeout: timeoutMs }
                 );
             }

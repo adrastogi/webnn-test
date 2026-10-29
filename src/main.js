@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const { test, expect, chromium } = require('@playwright/test');
 
-const { WptRunner, getWptConformanceUrl } = require('./wpt');
+const { WptRunner, getWptConformanceUrl, getWptTimeoutMs } = require('./wpt');
 const { ModelRunner } = require('./model');
 const { launchBrowser, killOwnBrowserProcesses, findBrowserRootPid, get_gpu_info, get_cpu_info, get_npu_info } = require('./util');
 const { getRuntimeInfo, runtimeInfoRows, resolveWindowsAppSdk, verifyWindowsAppSdk } = require('./runtime-info');
@@ -181,8 +181,19 @@ Examples:
 
   // setTimeout overflows (fires immediately) above 2^31-1 ms.
   const MAX_TIMEOUT_SEC = Math.floor(0x7FFFFFFF / 1000);
+  // Returns null when the flag is absent; exits if it is present without a value.
+  const getRequiredValueArg = (name) => {
+      const idx = args.indexOf(name);
+      if (idx === -1) return null;
+      const value = args[idx + 1];
+      if (value === undefined || value.trim() === '' || value.startsWith('--')) {
+          console.error(`Missing value for ${name}.`);
+          process.exit(1);
+      }
+      return value;
+  };
   const parseTimeoutArg = (name) => {
-      const raw = getArg(name);
+      const raw = getRequiredValueArg(name);
       if (raw === null) return null;
       const seconds = Number(raw);
       if (!Number.isFinite(seconds) || seconds <= 0 || seconds > MAX_TIMEOUT_SEC) {
@@ -194,8 +205,8 @@ Examples:
   const modelTimeout = parseTimeoutArg('--model-timeout');
   const wptTimeout = parseTimeoutArg('--wpt-timeout');
 
-  const wptBaseUrl = getArg('--wpt-base-url');
-  if (wptBaseUrl) {
+  const wptBaseUrl = getRequiredValueArg('--wpt-base-url');
+  if (wptBaseUrl !== null) {
       let parsed = null;
       try { parsed = new URL(wptBaseUrl); } catch (e) { /* handled below */ }
       if (!parsed || !['http:', 'https:'].includes(parsed.protocol)) {
@@ -413,9 +424,10 @@ Examples:
                     if (suite === 'wpt') {
                         const wptUrl = getWptConformanceUrl();
                         console.log(`Discovering WPT tests from ${wptUrl} ...`);
-                        await page.goto(wptUrl);
+                        const listTimeoutMs = process.env.WPT_TIMEOUT ? getWptTimeoutMs() : 10000;
                         try {
-                            await page.waitForSelector('.file', {timeout: 10000});
+                            await page.goto(wptUrl, { timeout: listTimeoutMs });
+                            await page.waitForSelector('.file', { timeout: listTimeoutMs });
                             const files = await page.$$eval('.file a', links =>
                                 links.map(l => l.textContent.trim()).filter(t => t.endsWith('.js'))
                             );

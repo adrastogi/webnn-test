@@ -303,6 +303,28 @@ By default, failed WPT test cases are retried automatically. Use `--skip-retry` 
 node src/main.js --suite wpt --skip-retry
 ```
 
+## Timeouts
+
+Model cases run under a per-case watchdog that aborts the case and restarts the browser if it hangs: 600 seconds by default, and 30 to 90 minutes for previews that download multi-GB models (text generation, SDXL, Stable Diffusion 1.5, SD-Turbo, Z-Image-Turbo). `--model-timeout` replaces the watchdog for every model case. WPT test files have a separate per-test limit (default 60 seconds). Override either in seconds:
+
+```bash
+# Allow slow model cases up to 30 minutes each
+node src/main.js --suite model --model-timeout 1800
+
+# Allow each WPT test file up to 3 minutes
+node src/main.js --suite wpt --wpt-timeout 180
+```
+
+## WPT Server
+
+WPT tests are loaded from `https://wpt.live` by default. Use `--wpt-base-url` to point at another WPT server root, such as a local `wpt serve` instance when wpt.live is unreachable or throttled:
+
+```bash
+node src/main.js --suite wpt --wpt-base-url http://localhost:8000
+```
+
+The harness appends `/webnn/conformance_tests/` to the URL (a full conformance_tests URL is also accepted). Test discovery relies on the wptserve directory listing, so the server must be `wpt serve` rather than a generic static file server. WebNN requires a secure context, so use `localhost` or HTTPS.
+
 ## Email Report
 
 Send test results via email after completion using `--email`:

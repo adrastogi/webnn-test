@@ -9,6 +9,7 @@ const {
     checkDetections,
     checkFaceLandmarks,
     checkFaceMatches,
+    checkStyleBuilds,
     checkImageStats,
     checkGraphDataType,
     checkTextResponse,
@@ -138,7 +139,24 @@ test('registered model cases have valid devices and default variants', () => {
 test('probability parsing accepts percentages and fractions', () => {
     assert.equal(parseProbability('99.22%'), 0.9922);
     assert.equal(parseProbability('0.650055468'), 0.650055468);
+    assert.equal(parseProbability('9.5e-1'), 0.95);
     assert.ok(Number.isNaN(parseProbability('n/a')));
+});
+
+test('probability parsing is strict so exponents and trailing text cannot hide out-of-range values', () => {
+    assert.equal(parseProbability('1e+2'), 100);
+    assert.equal(parseProbability('1E2'), 100);
+    assert.ok(Number.isNaN(parseProbability('0.5 extra')));
+    assert.ok(Number.isNaN(parseProbability('p=0.5')));
+    assert.throws(() => checkTopLabel('tiger', '1e+2', 'tiger'), /not in \(0, 1\]/);
+    assert.equal(checkTopLabel('tiger', '5e+1%', 'tiger'), 0.5);
+});
+
+test('style transfer must build exactly the requested style once', () => {
+    checkStyleBuilds(['self-portrait'], 'self-portrait');
+    assert.throws(() => checkStyleBuilds(['starry-night', 'self-portrait'], 'self-portrait'), /Expected one self-portrait model build, got: starry-night, self-portrait/);
+    assert.throws(() => checkStyleBuilds(['starry-night'], 'self-portrait'), /got: starry-night/);
+    assert.throws(() => checkStyleBuilds([], 'bedroom'), /got: none/);
 });
 
 test('top-1 label check matches case-insensitively and validates the probability', () => {

@@ -188,9 +188,10 @@ function skipResult(caseDef, reason, testUrl = caseDef.url) {
 
 // --- Output validators (pure; unit-tested in tests/model-cases.unit.cjs) ---
 
-// "99.22%" -> 0.9922, "0.65" -> 0.65
+// "99.22%" -> 0.9922, "0.65" -> 0.65, "9.5e-1" -> 0.95; anything else (e.g. "1e+2", "0.5 extra") is
+// parsed strictly so an out-of-range or malformed value cannot pass as a smaller number.
 function parseProbability(text) {
-  const match = /(-?\d+(?:\.\d+)?(?:e-?\d+)?)\s*(%)?/i.exec(text || '');
+  const match = /^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)\s*(%)?\s*$/i.exec(text || '');
   if (!match) return NaN;
   const value = Number(match[1]);
   return match[2] ? value / 100 : value;
@@ -218,6 +219,13 @@ function parseDetections(texts) {
     if (!match) throw new Error(`Unexpected detection label "${text}"`);
     return { label: match[1].trim(), score: Number(match[2]) };
   });
+}
+
+// Style transfer must build exactly the requested style once (no redundant default-style build).
+function checkStyleBuilds(builds, expectedStyle) {
+  if (builds.length !== 1 || builds[0] !== expectedStyle) {
+    throw new Error(`Expected one ${expectedStyle} model build, got: ${builds.join(', ') || 'none'}`);
+  }
 }
 
 // Canvas ignores non-finite coordinates, so such draws are counted separately and fail the case.
@@ -1190,15 +1198,24 @@ class ModelRunner extends WebNNRunner {
     const device = currentDevice();
     console.log(`Running sample test: ${caseDef.name} on ${device.toUpperCase()}`);
     await this.openSample(caseDef.url);
-    await this.resetSampleResult();
-    // Selecting the backend stylizes the content image with the default style.
-    await this.selectSampleDevice('backend', device);
-    let times = await this.waitForSampleResult();
-    if (caseDef.variantId !== 'starry-night') {
+    // With no backend chosen the sample only records the clicked style, so selecting the backend
+    // afterwards builds just that style; the sample logs "- Model ID: <style> -" for each build.
+    await this.page.locator(`[id="${caseDef.variantId}"]`).click();
+    const builds = [];
+    const buildListener = msg => {
+      const match = /- Model ID: (\S+) -/.exec(msg.text());
+      if (match) builds.push(match[1]);
+    };
+    this.page.on('console', buildListener);
+    let times;
+    try {
       await this.resetSampleResult();
-      await this.page.locator(`[id="${caseDef.variantId}"]`).click();
+      await this.selectSampleDevice('backend', device);
       times = await this.waitForSampleResult();
+    } finally {
+      this.page.removeListener('console', buildListener);
     }
+    checkStyleBuilds(builds, caseDef.variantId);
     await this.page.waitForTimeout(500);
 
     const input = await this.screenshot('#inputCanvas');
@@ -1898,6 +1915,7 @@ module.exports = {
   checkDetections,
   checkFaceLandmarks,
   checkFaceMatches,
+  checkStyleBuilds,
   findRepeatedPhrase,
   installCanvasCaptureInPage,
   trackContextCreationInPage,

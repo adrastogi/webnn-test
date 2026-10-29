@@ -332,6 +332,15 @@ function checkFraction(name, value, min, max) {
   return value;
 }
 
+// SAM blends its mask over the whole image, so nearly every pixel changes. Require that change
+// before trusting the recovered overlay: for identical screenshots the "overlay" is just the image.
+function checkMaskOverlay(diff, { minChanged = 0.25, minArea = 0.01, maxArea = 0.95 } = {}) {
+  if (!(diff && diff.changed >= minChanged)) {
+    throw new Error(`No mask was rendered: only ${((diff && diff.changed || 0) * 100).toFixed(1)}% of pixels changed after the click (need ${(minChanged * 100).toFixed(0)}%)`);
+  }
+  return checkFraction('Segmented mask area', diff.overlay, minArea, maxArea);
+}
+
 // Best Pearson correlation of two RMS envelopes, allowing the second to lag by up to maxLag frames.
 function envelopeCorrelation(a, b, maxLag = 5) {
   let best = -Infinity;
@@ -1486,10 +1495,10 @@ class ModelRunner extends WebNNRunner {
 
       // The decoder blends its mask image over the picture at 30% alpha; recover it to measure the mask.
       const diff = await this.imageDiff(await this.screenshot('#img_canvas'), before, { alpha: 0.3 });
-      checkFraction('Segmented mask area', diff.overlay, 0.01, 0.95);
+      checkMaskOverlay(diff);
       const perf = this.checkPerf(perfCollector, device, ['webnn.session.create', 'webnn.inference'], 'SAM');
       results.push(passResult(caseDef, testUrl,
-        `Mask covers ${(diff.overlay * 100).toFixed(1)}% of the image. Decoder latency: ${latency} ms`, perf));
+        `Mask covers ${(diff.overlay * 100).toFixed(1)}% of the image (${(diff.changed * 100).toFixed(1)}% of pixels changed). Decoder latency: ${latency} ms`, perf));
     } finally {
       errors.dispose();
       perfCollector.stop();
@@ -1815,6 +1824,8 @@ module.exports = {
   checkGraphDataType,
   checkTextResponse,
   checkFraction,
+  checkMaskOverlay,
+  analyzeImagesInPage,
   envelopeCorrelation,
   checkDenoisedAudio,
   checkWebNNPerf

@@ -14,6 +14,7 @@ const {
     checkTextResponse,
     findRepeatedPhrase,
     checkFraction,
+    checkMaskOverlay,
     envelopeCorrelation,
     checkDenoisedAudio,
     checkWebNNPerf
@@ -222,6 +223,52 @@ test('graph data type check requires constants of the selected type', () => {
     assert.equal(checkGraphDataType({ float16: 52, int64: 2 }, 'float16'), 'float16 x52, int64 x2');
     assert.throws(() => checkGraphDataType({ float32: 52 }, 'float16'), /Selected float16 but the graph was built from float32 x52 constants/);
     assert.throws(() => checkGraphDataType(undefined, 'float32'), /built from none constants/);
+});
+
+// Runs the in-page image analyzer in Node with stub Image/canvas globals over raw RGBA pixels.
+async function analyzeRawImages(images, args) {
+    const { analyzeImagesInPage } = require('../src/model');
+    const previous = { Image: global.Image, document: global.document };
+    global.Image = class {
+        set src(value) { this.pixels = images[value.replace('data:image/png;base64,', '')]; this.width = this.pixels.width; this.height = this.pixels.height; }
+        async decode() {}
+    };
+    global.document = {
+        createElement: () => {
+            let drawn = null;
+            return { getContext: () => ({ drawImage: img => { drawn = img; }, getImageData: () => ({ data: drawn.pixels.data }) }) };
+        }
+    };
+    try {
+        return await analyzeImagesInPage(args);
+    } finally {
+        global.Image = previous.Image;
+        global.document = previous.document;
+    }
+}
+
+function rgba(width, height, pixel) {
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let i = 0; i < width * height; i++) data.set([...pixel(i), 255], i * 4);
+    return { width, height, data };
+}
+
+test('mask check fails for identical before/after screenshots', async () => {
+    const image = rgba(10, 10, i => [200, 150 + (i % 50), 100]);
+    const diff = await analyzeRawImages({ before: image, after: image }, { a: 'after', b: 'before', alpha: 0.3 });
+    assert.equal(diff.changed, 0);
+    assert.ok(diff.overlay > 0.5, 'the recovered overlay of an unchanged image is the image itself');
+    assert.throws(() => checkMaskOverlay(diff), /No mask was rendered: only 0\.0% of pixels changed/);
+});
+
+test('mask check accepts a 30% mask blend and measures the masked area', async () => {
+    const before = rgba(10, 10, i => [200, 150 + (i % 50), 100]);
+    // A white mask over the first 20 pixels, black elsewhere, blended at alpha 0.3.
+    const after = rgba(10, 10, i => [0, 1, 2].map(c => Math.round(0.7 * before.data[i * 4 + c] + 0.3 * (i < 20 ? 255 : 0))));
+    const diff = await analyzeRawImages({ before, after }, { a: 'after', b: 'before', alpha: 0.3 });
+    assert.ok(diff.changed >= 0.8);
+    assert.equal(checkMaskOverlay(diff), 0.2);
+    assert.throws(() => checkMaskOverlay({ changed: 0.98, overlay: 0.001 }), /Segmented mask area 0\.1% is outside/);
 });
 
 test('image and fraction checks reject blank output and out-of-band values', () => {
